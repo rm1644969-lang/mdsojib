@@ -64,7 +64,15 @@ document.addEventListener('DOMContentLoaded', () => {
 function loadFromStorage() {
   try {
     const savedAccounts = localStorage.getItem(STORAGE_KEY_ACCOUNTS);
-    if (savedAccounts) accounts = JSON.parse(savedAccounts);
+    if (savedAccounts) {
+      accounts = JSON.parse(savedAccounts);
+      // Clean loaded accounts: do NOT show stale OTP boxes on reload/startup
+      accounts.forEach((acc) => {
+        acc.isBaselineDone = false;
+        acc.lastStatus = 'idle';
+        acc.lastOtp = null; // Do NOT show old OTP
+      });
+    }
     
     const savedSettings = localStorage.getItem(STORAGE_KEY_SETTINGS);
     if (savedSettings) {
@@ -132,13 +140,15 @@ function initServerSse() {
             email: otpData.email,
             lastStatus: 'success',
             lastOtp: otpData.code,
-            lastSeenCode: null
+            lastSeenCode: otpData.code,
+            isBaselineDone: true
           };
           accounts.push(account);
         }
 
         if (account.lastSeenCode !== otpData.code) {
           account.lastSeenCode = otpData.code;
+          account.isBaselineDone = true;
           await handleNewOtp(account, otpData.code, otpData.icon, otpData.messages);
         }
       } catch (err) {
@@ -179,9 +189,12 @@ async function fetchLatestServerOtps() {
     const data = await res.json();
     if (data.status && Array.isArray(data.otps) && data.otps.length > 0) {
       for (const item of data.otps) {
+        // Only accept if this OTP was captured recently (within last 3 minutes)
+        if (Date.now() - item.timestamp > 180000) continue;
         const acc = accounts.find((a) => a.email.toLowerCase() === item.email.toLowerCase());
         if (acc && acc.lastSeenCode !== item.code) {
           acc.lastSeenCode = item.code;
+          acc.isBaselineDone = true;
           await handleNewOtp(acc, item.code, item.icon, item.messages);
         }
       }
@@ -1007,15 +1020,21 @@ async function runMonitoringCycle() {
         const { code, icon, messages } = extractOtpAndDetails(result);
 
         if (code) {
-          if (account.lastSeenCode !== code) {
+          if (!account.isBaselineDone) {
+            // First time checking account: record existing inbox code as baseline snapshot, NEVER alert or show old code
+            account.isBaselineDone = true;
+            account.lastSeenCode = code;
+            account.lastStatus = 'idle';
+            account.lastOtp = null;
+          } else if (account.lastSeenCode !== code) {
+            // A genuine NEW OTP arrived!
             account.lastSeenCode = code;
             await handleNewOtp(account, code, icon, messages);
           } else {
-            account.lastStatus = 'success';
-            account.lastOtp = code;
-            account.lastIcon = icon;
+            account.lastStatus = account.lastOtp ? 'success' : 'idle';
           }
         } else {
+          account.isBaselineDone = true;
           if (result && result.error) {
             if (result.error_code === 'token_error') {
               account.lastStatus = 'error';
@@ -1055,9 +1074,25 @@ async function checkSingleAccount(accountId) {
     const { code, icon, messages } = extractOtpAndDetails(result);
 
     if (code) {
-      account.lastSeenCode = code;
-      await handleNewOtp(account, code, icon, messages);
+      if (!account.isBaselineDone) {
+        account.isBaselineDone = true;
+        if (account.lastSeenCode && account.lastSeenCode !== code) {
+          account.lastSeenCode = code;
+          await handleNewOtp(account, code, icon, messages);
+        } else {
+          account.lastSeenCode = code;
+          showToast(`Account calibrated. Inbox has code ${code}. Ready for NEW OTP!`, 'info');
+          account.lastStatus = 'idle';
+        }
+      } else if (account.lastSeenCode !== code) {
+        account.lastSeenCode = code;
+        await handleNewOtp(account, code, icon, messages);
+      } else {
+        showToast(`No new OTP (Inbox code ${code} is already checked)`, 'info');
+        account.lastStatus = account.lastOtp ? 'success' : 'idle';
+      }
     } else {
+      account.isBaselineDone = true;
       showToast(result && result.error ? result.error : 'No active OTP in mailbox yet', 'info');
       account.lastStatus = account.lastOtp ? 'success' : 'idle';
       if (result && result.error_code === 'token_error') {
@@ -1186,7 +1221,8 @@ function parseSingleAccountLine(line) {
     lastIcon: null,
     lastCheckedTime: null,
     lastError: null,
-    lastSeenCode: null
+    lastSeenCode: null,
+    isBaselineDone: false
   };
 }
 

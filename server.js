@@ -202,27 +202,35 @@ async function runServerMonitorCycle() {
         const result = await res.json();
         const { code, icon, messages } = extractOtpAndDetails(result);
 
-          if (code) {
-            if (account.lastSeenCode !== code) {
-              account.lastSeenCode = code;
-              console.log(`⚡ [SERVER OTP CAPTURED] ${account.email} => ${code}`);
+        if (code) {
+          if (!account.isBaselineDone) {
+            // First time checking account on server: record existing code as baseline, NEVER broadcast old code
+            account.isBaselineDone = true;
+            account.lastSeenCode = code;
+            console.log(`[SERVER BASELINE] ${account.email} existing code ${code} recorded (ignored as old OTP)`);
+          } else if (account.lastSeenCode !== code) {
+            // A genuine NEW OTP arrived!
+            account.lastSeenCode = code;
+            console.log(`⚡ [SERVER NEW OTP CAPTURED] ${account.email} => ${code}`);
 
-              const otpEvent = {
-                id: 'otp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
-                email: account.email,
-                code: code,
-                icon: icon,
-                time: new Date().toLocaleTimeString(),
-                timestamp: Date.now(),
-                messages: messages
-              };
+            const otpEvent = {
+              id: 'otp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+              email: account.email,
+              code: code,
+              icon: icon,
+              time: new Date().toLocaleTimeString(),
+              timestamp: Date.now(),
+              messages: messages
+            };
 
-              serverLatestOtps.unshift(otpEvent);
-              if (serverLatestOtps.length > 50) serverLatestOtps.pop();
+            serverLatestOtps.unshift(otpEvent);
+            if (serverLatestOtps.length > 50) serverLatestOtps.pop();
 
-              broadcastSse('NEW_OTP', otpEvent);
-            }
+            broadcastSse('NEW_OTP', otpEvent);
           }
+        } else {
+          account.isBaselineDone = true;
+        }
         } catch (err) {
           // Silent catch to keep loop running
         }
@@ -288,7 +296,14 @@ app.get('/api/network-info', async (req, res) => {
 app.post('/api/monitor/sync', (req, res) => {
   const { accounts, isMonitoring, pollInterval } = req.body;
   if (Array.isArray(accounts)) {
-    serverAccounts = accounts;
+    serverAccounts = accounts.map((incomingAcc) => {
+      const existing = serverAccounts.find((s) => s.email.toLowerCase() === incomingAcc.email.toLowerCase());
+      return {
+        ...incomingAcc,
+        isBaselineDone: existing ? existing.isBaselineDone : (incomingAcc.isBaselineDone || false),
+        lastSeenCode: existing ? existing.lastSeenCode : (incomingAcc.lastSeenCode || null)
+      };
+    });
   }
   if (pollInterval && pollInterval >= 2000) {
     serverPollInterval = pollInterval;

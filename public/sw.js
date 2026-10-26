@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mailcode-otp-v4';
+const CACHE_NAME = 'mailcode-otp-v5';
 const ASSETS = [
   '/',
   '/index.html',
