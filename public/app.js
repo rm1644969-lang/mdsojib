@@ -1,6 +1,7 @@
 /**
  * MailCode OTP Grabber & Auto-Copy App
  * Real-time Hotmail/Outlook OTP monitoring with heads-up SMS notification banner and auto-copy.
+ * Features: Background Keep-Alive, Server-Side Parallel Polling, Smart Token Parsing, All-Permissions Setup.
  */
 
 // ============================================================================
@@ -9,6 +10,10 @@
 const STORAGE_KEY_ACCOUNTS = 'mailcode_accounts_v1';
 const STORAGE_KEY_SETTINGS = 'mailcode_settings_v1';
 const STORAGE_KEY_HISTORY = 'mailcode_history_v1';
+const STORAGE_KEY_PERMISSIONS = 'mailcode_permissions_granted_v1';
+
+const DEFAULT_CLIENT_ID = '1fec8e78-bce4-4aaf-ab1b-5451cc387264';
+const DEFAULT_PASSWORD = 'Pass12345!';
 
 let accounts = [];
 let history = [];
@@ -22,11 +27,12 @@ let settings = {
 };
 
 let monitoringInterval = null;
-let currentCheckingIndex = 0;
+let bgWorker = null;
 let isCurrentlyFetching = false;
 let wakeLockSentinel = null;
 let audioContext = null;
 let bannerTimeout = null;
+let sseSource = null;
 
 // ============================================================================
 // INITIALIZATION
@@ -35,11 +41,14 @@ document.addEventListener('DOMContentLoaded', () => {
   loadFromStorage();
   initServiceWorker();
   initDomEvents();
+  initServerSse();
+  initBackgroundWorker();
   renderAccountsList();
   renderHistoryList();
   updateMetrics();
   checkApiHealth();
   fetchNetworkInfo();
+  checkPermissionsOnLoad();
 });
 
 // Load saved data
@@ -51,7 +60,7 @@ function loadFromStorage() {
     const savedSettings = localStorage.getItem(STORAGE_KEY_SETTINGS);
     if (savedSettings) {
       settings = { ...settings, ...JSON.parse(savedSettings) };
-      // Always reset monitoring to false on initial page load
+      // Reset monitoring to false initially until user starts
       settings.isMonitoring = false;
     }
     
@@ -80,6 +89,165 @@ function initServiceWorker() {
     navigator.serviceWorker.register('/sw.js')
       .then((reg) => console.log('SW Registered:', reg.scope))
       .catch((err) => console.log('SW Reg Failed:', err));
+
+    // Listen for messages from SW (e.g. notification click auto-copy)
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      if (event.data && event.data.type === 'COPY_CODE') {
+        const code = event.data.code;
+        copyToClipboard(code);
+        showToast(`⚡ OTP Code ${code} Auto-Copied!`, 'success');
+      }
+    });
+  }
+}
+
+// ============================================================================
+// SERVER-SENT EVENTS (SSE) LISTENER
+// (Receives OTPs detected by the PC Node server 24/7 even when phone is minimized)
+// ============================================================================
+function initServerSse() {
+  if (!window.EventSource) return;
+  try {
+    if (sseSource) sseSource.close();
+    sseSource = new EventSource('/api/monitor/events');
+
+    sseSource.addEventListener('NEW_OTP', async (e) => {
+      try {
+        const otpData = JSON.parse(e.data);
+        console.log('⚡ [SSE INCOMING OTP]', otpData);
+        
+        let account = accounts.find((a) => a.email.toLowerCase() === otpData.email.toLowerCase());
+        if (!account) {
+          account = {
+            id: 'acc_srv_' + Date.now(),
+            email: otpData.email,
+            lastStatus: 'success',
+            lastOtp: otpData.code,
+            lastSeenCode: null
+          };
+          accounts.push(account);
+        }
+
+        if (account.lastSeenCode !== otpData.code) {
+          account.lastSeenCode = otpData.code;
+          await handleNewOtp(account, otpData.code, otpData.icon, otpData.messages);
+        }
+      } catch (err) {
+        console.warn('SSE Parse error:', err);
+      }
+    });
+
+    sseSource.onerror = () => {
+      // Reconnect handled automatically by EventSource
+    };
+  } catch (e) {
+    console.warn('SSE Init error:', e);
+  }
+}
+
+// Sync accounts list and monitoring status with Node server
+async function syncWithServerMonitor() {
+  try {
+    await fetch('/api/monitor/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accounts: accounts,
+        isMonitoring: settings.isMonitoring,
+        pollInterval: settings.pollInterval
+      })
+    });
+  } catch (e) {
+    console.log('Server sync fallback (standalone):', e.message);
+  }
+}
+
+// Fetch latest OTPs from server (called when app wakes up from background/Instagram)
+async function fetchLatestServerOtps() {
+  try {
+    const res = await fetch('/api/monitor/latest-otps');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.status && Array.isArray(data.otps) && data.otps.length > 0) {
+      for (const item of data.otps) {
+        const acc = accounts.find((a) => a.email.toLowerCase() === item.email.toLowerCase());
+        if (acc && acc.lastSeenCode !== item.code) {
+          acc.lastSeenCode = item.code;
+          await handleNewOtp(acc, item.code, item.icon, item.messages);
+        }
+      }
+    }
+  } catch (e) {
+    // silent catch
+  }
+}
+
+// ============================================================================
+// BACKGROUND WORKER (PREVENTS TIMER THROTTLING WHEN MINIMIZED)
+// ============================================================================
+function initBackgroundWorker() {
+  try {
+    const workerCode = `
+      let timer = null;
+      self.onmessage = function(e) {
+        if (e.data.action === 'start') {
+          if (timer) clearInterval(timer);
+          timer = setInterval(function() {
+            self.postMessage('TICK');
+          }, e.data.interval || 5000);
+        } else if (e.data.action === 'stop') {
+          if (timer) clearInterval(timer);
+          timer = null;
+        }
+      };
+    `;
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    bgWorker = new Worker(URL.createObjectURL(blob));
+    bgWorker.onmessage = function(e) {
+      if (e.data === 'TICK' && settings.isMonitoring) {
+        runMonitoringCycle();
+      }
+    };
+  } catch (e) {
+    console.log('Web Worker not supported, using standard timer:', e);
+  }
+}
+
+// ============================================================================
+// BACKGROUND KEEP-ALIVE AUDIO
+// (Keeps mobile Chrome tab from freezing when minimized to Instagram)
+// ============================================================================
+function startBackgroundKeepAlive() {
+  const audioEl = document.getElementById('bgKeepAliveAudio');
+  if (audioEl) {
+    audioEl.volume = 0.01;
+    audioEl.play().catch((err) => {
+      console.log('Background audio unlock pending user gesture:', err.message);
+    });
+  }
+
+  // Set up MediaSession metadata so Android marks app as active media
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: 'MailCode OTP Live Monitor',
+        artist: 'Background Monitoring Active',
+        album: 'Instant OTP & Auto-Copy'
+      });
+      navigator.mediaSession.playbackState = 'playing';
+    } catch (e) {}
+  }
+}
+
+function stopBackgroundKeepAlive() {
+  const audioEl = document.getElementById('bgKeepAliveAudio');
+  if (audioEl) {
+    audioEl.pause();
+  }
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.playbackState = 'paused';
+    } catch (e) {}
   }
 }
 
@@ -105,7 +273,7 @@ function playSmsChime() {
     osc1.frequency.setValueAtTime(880, now);
     osc1.frequency.exponentialRampToValueAtTime(1174.66, now + 0.12); // D6
     
-    gain1.gain.setValueAtTime(0.5, now);
+    gain1.gain.setValueAtTime(0.6, now);
     gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
     
     osc1.connect(gain1);
@@ -122,14 +290,14 @@ function playSmsChime() {
     osc2.frequency.exponentialRampToValueAtTime(1760, now + 0.25); // A6
     
     gain2.gain.setValueAtTime(0.001, now);
-    gain2.gain.setValueAtTime(0.6, now + 0.1);
-    gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.65);
+    gain2.gain.setValueAtTime(0.7, now + 0.1);
+    gain2.gain.exponentialRampToValueAtTime(0.0001, now + 0.7);
     
     osc2.connect(gain2);
     gain2.connect(audioContext.destination);
     
     osc2.start(now + 0.1);
-    osc2.stop(now + 0.65);
+    osc2.stop(now + 0.7);
   } catch (err) {
     console.warn('Audio chime error:', err);
   }
@@ -141,8 +309,7 @@ function playSmsChime() {
 function triggerVibration() {
   if (settings.vibrate && 'vibrate' in navigator) {
     try {
-      // Standard smartphone double pulse vibration
-      navigator.vibrate([120, 80, 150, 80, 200]);
+      navigator.vibrate([150, 80, 200, 80, 250]);
     } catch (e) {
       console.warn('Vibration blocked:', e);
     }
@@ -168,7 +335,7 @@ async function copyToClipboard(text) {
     document.body.removeChild(textArea);
     return successful;
   } catch (err) {
-    console.error('Clipboard copy error:', err);
+    console.warn('Clipboard copy error (will copy on app focus):', err.message);
     return false;
   }
 }
@@ -184,11 +351,14 @@ async function requestWakeLock() {
       wakeLockSentinel.addEventListener('release', () => {
         updateWakeLockUI(false);
       });
+      return true;
     } catch (err) {
       console.log('WakeLock not granted or supported:', err.message);
       updateWakeLockUI(false);
+      return false;
     }
   }
+  return false;
 }
 
 function releaseWakeLock() {
@@ -202,28 +372,122 @@ function releaseWakeLock() {
 function updateWakeLockUI(isActive) {
   const btn = document.getElementById('wakeLockBtn');
   const icon = document.getElementById('wakeLockIcon');
+  if (!btn || !icon) return;
   if (isActive) {
     btn.classList.add('active');
     icon.style.color = '#f59e0b';
-    btn.title = 'Screen Wake Lock: Active (Screen will not sleep)';
+    btn.title = 'Screen Wake Lock: Active (স্ক্রিন বন্ধ হবে না)';
   } else {
     btn.classList.remove('active');
     icon.style.color = '';
-    btn.title = 'Screen Wake Lock: Inactive';
+    btn.title = 'Screen Wake Lock: Inactive (ক্লিক করে অন করুন)';
   }
 }
 
-// Re-acquire wake lock if page becomes visible again
+// Re-acquire wake lock & sync latest OTPs if user returns from Instagram / another app
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && settings.isMonitoring) {
-    requestWakeLock();
+  if (document.visibilityState === 'visible') {
+    fetchLatestServerOtps();
+    if (settings.isMonitoring) {
+      requestWakeLock();
+      startBackgroundKeepAlive();
+    }
   }
 });
 
 // ============================================================================
+// ALL PERMISSION SETUP MODAL (ONBOARDING)
+// ============================================================================
+function checkPermissionsOnLoad() {
+  const permGranted = localStorage.getItem(STORAGE_KEY_PERMISSIONS);
+  updatePermissionBadges();
+
+  // If notification permission is default or not yet granted, prompt user nicely
+  if (!permGranted || (('Notification' in window) && Notification.permission === 'default')) {
+    setTimeout(() => {
+      openPermissionModal();
+    }, 600);
+  }
+}
+
+function updatePermissionBadges() {
+  const notifBadge = document.getElementById('permNotifBadge');
+  const soundBadge = document.getElementById('permSoundBadge');
+  const wakeBadge = document.getElementById('permWakeBadge');
+  const permBadgeDot = document.getElementById('permBadgeDot');
+
+  const notifGranted = ('Notification' in window) && Notification.permission === 'granted';
+  if (notifBadge) {
+    if (notifGranted) {
+      notifBadge.textContent = 'Active ✓';
+      notifBadge.className = 'perm-status-badge granted';
+    } else {
+      notifBadge.textContent = 'Required';
+      notifBadge.className = 'perm-status-badge';
+    }
+  }
+
+  if (soundBadge) {
+    soundBadge.textContent = settings.soundAlert ? 'Active ✓' : 'Disabled';
+    soundBadge.className = settings.soundAlert ? 'perm-status-badge granted' : 'perm-status-badge';
+  }
+
+  if (wakeBadge) {
+    wakeBadge.textContent = wakeLockSentinel ? 'Active ✓' : 'Ready';
+    wakeBadge.className = wakeLockSentinel ? 'perm-status-badge granted' : 'perm-status-badge';
+  }
+
+  if (permBadgeDot) {
+    permBadgeDot.style.display = notifGranted ? 'none' : 'block';
+  }
+}
+
+async function grantAllPermissions() {
+  // 1. Notification Permission
+  if ('Notification' in window) {
+    try {
+      await Notification.requestPermission();
+    } catch (e) {
+      console.warn('Notification permission error:', e);
+    }
+  }
+
+  // 2. Sound & Background Keep-Alive Audio Unlock
+  playSmsChime();
+  startBackgroundKeepAlive();
+
+  // 3. Screen Wake Lock
+  await requestWakeLock();
+
+  // 4. Save state
+  localStorage.setItem(STORAGE_KEY_PERMISSIONS, 'true');
+  updatePermissionBadges();
+  closePermissionModal();
+
+  showToast('✓ সব পারমিশন সফলভাবে চালু হয়েছে!', 'success');
+}
+
+function openPermissionModal() {
+  updatePermissionBadges();
+  document.getElementById('permissionModal').classList.add('active');
+}
+
+function closePermissionModal() {
+  document.getElementById('permissionModal').classList.remove('active');
+}
+
+function openWakeLockModal() {
+  document.getElementById('wakeLockModal').classList.add('active');
+}
+
+function closeWakeLockModal() {
+  document.getElementById('wakeLockModal').classList.remove('active');
+}
+
+// ============================================================================
 // TOP HEADS-UP SMS NOTIFICATION BANNER
 // ============================================================================
-function showHeadsUpBanner(otpCode, email, iconClass, serviceName) {
+function showHeadsUpBanner(otpCode, email, iconClass) {
   const banner = document.getElementById('headsUpBanner');
   const bannerEmail = document.getElementById('bannerEmail');
   const bannerOtpCode = document.getElementById('bannerOtpCode');
@@ -276,32 +540,36 @@ function hideHeadsUpBanner() {
   if (bannerTimeout) clearTimeout(bannerTimeout);
 }
 
-// Request System Notification Permission
-async function requestNotificationPermission() {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'default') {
-    await Notification.requestPermission();
-  }
-}
-
-function sendSystemNotification(code, email, serviceName) {
+// Send Native Push Notification (Displays on Mobile Screen even when minimized)
+function sendSystemNotification(code, email) {
   if (!settings.systemNotif || !('Notification' in window)) return;
   if (Notification.permission === 'granted') {
     try {
+      const title = `⚡ OTP Code: ${code}`;
       const options = {
-        body: `New OTP for ${email}: ${code}\nAutomatically copied to clipboard!`,
+        body: `New OTP for ${email}\nTap to open & auto-copy to clipboard!`,
         icon: '/icons/icon-192.svg',
         badge: '/icons/icon-192.svg',
         tag: 'otp-' + Date.now(),
-        data: { code: code }
+        renotify: true,
+        vibrate: [200, 100, 200, 100, 200],
+        requireInteraction: true,
+        data: { code: code, email: email }
       };
       
+      // Preferred: Route through ServiceWorker (vital for background display on Android)
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'SHOW_NOTIFICATION',
+          title: title,
+          options: options
+        });
+      } else if (navigator.serviceWorker && navigator.serviceWorker.ready) {
         navigator.serviceWorker.ready.then((reg) => {
-          reg.showNotification(`⚡ OTP Code: ${code}`, options);
+          reg.showNotification(title, options);
         });
       } else {
-        new Notification(`⚡ OTP Code: ${code}`, options);
+        new Notification(title, options);
       }
     } catch (e) {
       console.warn('System notification error:', e);
@@ -313,9 +581,9 @@ function sendSystemNotification(code, email, serviceName) {
 // CORE OTP HANDLER (TRIGGERED WHEN A NEW OTP IS FOUND)
 // ============================================================================
 async function handleNewOtp(account, otpCode, iconClass, messages) {
-  console.log(`🚀 [NEW OTP] ${account.email} => ${otpCode}`);
+  console.log(`🚀 [NEW OTP CAPTURED] ${account.email} => ${otpCode}`);
 
-  // 1. Play SMS alert ringtone
+  // 1. Play loud SMS alert ringtone
   playSmsChime();
 
   // 2. Vibrate mobile phone
@@ -330,8 +598,8 @@ async function handleNewOtp(account, otpCode, iconClass, messages) {
   // 4. Show top heads-up banner on phone screen
   showHeadsUpBanner(otpCode, account.email, iconClass || 'fa-solid fa-key');
 
-  // 5. Send native push notification
-  sendSystemNotification(otpCode, account.email, 'MailCode');
+  // 5. Send native phone push notification (heads-up while on Instagram)
+  sendSystemNotification(otpCode, account.email);
 
   // 6. Toast alert
   if (copied) {
@@ -352,7 +620,7 @@ async function handleNewOtp(account, otpCode, iconClass, messages) {
   };
   
   history.unshift(historyItem);
-  if (history.length > 50) history.pop(); // keep last 50
+  if (history.length > 50) history.pop();
 
   // 8. Update account state
   account.lastOtp = otpCode;
@@ -367,50 +635,85 @@ async function handleNewOtp(account, otpCode, iconClass, messages) {
 }
 
 // ============================================================================
-// API CALLER (WITH DIRECT CORS & FALLBACK LOCAL PROXY)
+// BULLETPROOF OTP EXTRACTOR
+// (Handles code, otp, data.code, and regex in content/messages)
+// ============================================================================
+function extractOtpCode(result) {
+  if (!result) return null;
+
+  // 1. Direct properties
+  if (result.code) return String(result.code).trim();
+  if (result.otp) return String(result.otp).trim();
+  if (result.verification_code) return String(result.verification_code).trim();
+  if (result.data && (result.data.code || result.data.otp)) {
+    return String(result.data.code || result.data.otp).trim();
+  }
+
+  // 2. Regex scan inside content, message or messages array
+  const textToScan = [
+    result.content,
+    result.message,
+    ...(Array.isArray(result.messages) ? result.messages : [])
+  ].filter(Boolean).join(' ');
+
+  if (textToScan) {
+    // Look for OTP patterns like "code is 123456", "code: 123456", or 4-8 digit numbers
+    const otpMatch = textToScan.match(/(?:code|otp|verification|pin|password)[\s:=#is]+([0-9]{4,8})/i)
+      || textToScan.match(/\b([0-9]{6})\b/)
+      || textToScan.match(/\b([0-9]{4,8})\b/);
+    if (otpMatch) {
+      return otpMatch[1].trim();
+    }
+  }
+
+  return null;
+}
+
+// ============================================================================
+// API CALLER (WITH SMART DEFAULTS & LOCAL PROXY FALLBACK)
 // ============================================================================
 async function fetchAccountOtp(account) {
   const payload = {
     email: account.email,
-    password: account.password,
+    password: account.password || DEFAULT_PASSWORD,
     refresh_token: account.refreshToken,
-    client_id: account.clientId
+    client_id: account.clientId || DEFAULT_CLIENT_ID
   };
   if (account.recoveryEmail) {
     payload.recovery_email = account.recoveryEmail;
   }
 
-  // Try direct fetch first
+  // 1. Try local server proxy first (reliable, handles CORS, runs on same Wi-Fi)
+  try {
+    const proxyRes = await fetch('/api/proxy-fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(18000)
+    });
+    if (proxyRes.ok) {
+      return await proxyRes.json();
+    }
+  } catch (proxyErr) {
+    // If proxy failed, fallback to direct fetch
+  }
+
+  // 2. Fallback to direct fetch
   try {
     const res = await fetch('https://code.yamin.bd/api.php?action=fetch', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(20000)
+      signal: AbortSignal.timeout(18000)
     });
-    const data = await res.json();
-    return data;
+    return await res.json();
   } catch (directErr) {
-    console.warn(`Direct fetch failed for ${account.email}, trying local proxy:`, directErr.message);
-    // Try fallback proxy if local server is running
-    try {
-      const proxyRes = await fetch('/api/proxy-fetch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(20000)
-      });
-      return await proxyRes.json();
-    } catch (proxyErr) {
-      throw new Error(proxyErr.message || directErr.message);
-    }
+    throw new Error('Connection failed: ' + directErr.message);
   }
 }
 
 // ============================================================================
-// MONITORING LOOP ENGINE ("RUNNING TIME E JETAY KAJ HOBE")
+// MONITORING LOOP ENGINE
 // ============================================================================
 function startMonitoring() {
   if (accounts.length === 0) {
@@ -419,21 +722,29 @@ function startMonitoring() {
     return;
   }
 
-  // Unlock AudioContext on user interaction
+  // Unlock Audio & Keep-Alive on user interaction
   playSmsChime();
+  startBackgroundKeepAlive();
   requestWakeLock();
-  requestNotificationPermission();
 
   settings.isMonitoring = true;
   saveToStorage();
   updateMonitoringUI(true);
+
+  // Sync state with backend server so PC monitors in parallel
+  syncWithServerMonitor();
 
   showToast(`Live Monitoring Started (${accounts.length} accounts)`, 'success');
 
   // Immediately run first check
   runMonitoringCycle();
 
-  // Schedule recurring checks
+  // Background Web Worker
+  if (bgWorker) {
+    bgWorker.postMessage({ action: 'start', interval: settings.pollInterval });
+  }
+
+  // Standard interval fallback
   if (monitoringInterval) clearInterval(monitoringInterval);
   monitoringInterval = setInterval(runMonitoringCycle, settings.pollInterval);
 }
@@ -444,11 +755,19 @@ function stopMonitoring() {
     clearInterval(monitoringInterval);
     monitoringInterval = null;
   }
+  if (bgWorker) {
+    bgWorker.postMessage({ action: 'stop' });
+  }
+
   releaseWakeLock();
+  stopBackgroundKeepAlive();
   saveToStorage();
   updateMonitoringUI(false);
 
-  // Set any 'checking' accounts back to their previous state
+  // Sync state with server
+  syncWithServerMonitor();
+
+  // Set any 'checking' accounts back
   accounts.forEach((acc) => {
     if (acc.lastStatus === 'checking') {
       acc.lastStatus = acc.lastOtp ? 'success' : 'idle';
@@ -464,7 +783,7 @@ async function runMonitoringCycle() {
   isCurrentlyFetching = true;
   document.getElementById('metricActive').textContent = accounts.length;
 
-  // We check 2 accounts concurrently for speed and reliability without getting banned
+  // Check 2 accounts concurrently
   const batchSize = Math.min(2, accounts.length);
   
   for (let b = 0; b < accounts.length; b += batchSize) {
@@ -472,37 +791,33 @@ async function runMonitoringCycle() {
     
     const currentBatch = accounts.slice(b, b + batchSize);
     
-    // Mark batch as checking
     currentBatch.forEach((acc) => {
       acc.lastStatus = 'checking';
     });
     renderAccountsList();
 
-    // Execute batch
     await Promise.all(
       currentBatch.map(async (account) => {
         try {
           const result = await fetchAccountOtp(account);
           account.lastCheckedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           
-          if (result && result.status === true && result.code) {
-            const newCode = String(result.code).trim();
-            const icon = result.icon || 'fa-solid fa-envelope-open-text';
+          const code = extractOtpCode(result);
 
-            // Check if this is a fresh new OTP code that we haven't processed yet
-            if (account.lastSeenCode !== newCode) {
-              account.lastSeenCode = newCode;
-              await handleNewOtp(account, newCode, icon, result.messages);
+          if (code) {
+            const icon = (result && result.icon) || 'fa-solid fa-envelope-open-text';
+            const messages = (result && (result.messages || [result.content])) || [];
+
+            if (account.lastSeenCode !== code) {
+              account.lastSeenCode = code;
+              await handleNewOtp(account, code, icon, messages);
             } else {
-              // Same code as before - update status without repeat loud sound/auto-copy
               account.lastStatus = 'success';
-              account.lastOtp = newCode;
+              account.lastOtp = code;
               account.lastIcon = icon;
             }
           } else {
-            // Status false or no code yet
             if (result && result.error) {
-              // Token error or other API message
               if (result.error_code === 'token_error') {
                 account.lastStatus = 'error';
                 account.lastError = 'Token Error';
@@ -541,16 +856,16 @@ async function checkSingleAccount(accountId) {
   try {
     const result = await fetchAccountOtp(account);
     account.lastCheckedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const code = extractOtpCode(result);
 
-    if (result && result.status === true && result.code) {
-      const code = String(result.code).trim();
-      const icon = result.icon || 'fa-solid fa-key';
+    if (code) {
+      const icon = (result && result.icon) || 'fa-solid fa-key';
       account.lastSeenCode = code;
-      await handleNewOtp(account, code, icon, result.messages);
+      await handleNewOtp(account, code, icon, result.messages || [result.content]);
     } else {
-      showToast(result.error || 'No active OTP found in mailbox yet', 'info');
+      showToast(result.error || 'No active OTP in mailbox yet', 'info');
       account.lastStatus = account.lastOtp ? 'success' : 'idle';
-      if (result.error_code === 'token_error') {
+      if (result && result.error_code === 'token_error') {
         account.lastStatus = 'error';
         account.lastError = 'Token Error';
       }
@@ -570,11 +885,11 @@ async function checkSingleAccount(accountId) {
 // ============================================================================
 async function runSimulationTest() {
   const sampleServices = [
+    { icon: 'fa-brands fa-instagram', name: 'Instagram' },
     { icon: 'fa-brands fa-google', name: 'Google' },
-    { icon: 'fa-brands fa-microsoft', name: 'Microsoft' },
     { icon: 'fa-brands fa-whatsapp', name: 'WhatsApp' },
     { icon: 'fa-brands fa-facebook', name: 'Facebook' },
-    { icon: 'fa-brands fa-telegram', name: 'Telegram' }
+    { icon: 'fa-brands fa-microsoft', name: 'Microsoft' }
   ];
   
   const chosen = sampleServices[Math.floor(Math.random() * sampleServices.length)];
@@ -592,42 +907,101 @@ async function runSimulationTest() {
 }
 
 // ============================================================================
-// ACCOUNTS MANAGEMENT & BULK PARSER
+// SMART ACCOUNTS PARSER
+// (Supports email|token, email|password|token, delimiters ----, :, |, tabs)
 // ============================================================================
+function parseSingleAccountLine(line) {
+  line = line.trim();
+  if (!line) return null;
+
+  // Split by common delimiters: ----, |, tab, :, or comma
+  let parts;
+  if (line.includes('----')) {
+    parts = line.split('----');
+  } else if (line.includes('\t')) {
+    parts = line.split('\t');
+  } else if (line.includes('|')) {
+    parts = line.split('|');
+  } else if (line.includes(':') && !line.startsWith('http')) {
+    parts = line.split(':');
+  } else if (line.includes(',')) {
+    parts = line.split(',');
+  } else {
+    parts = line.split(/\s+/);
+  }
+
+  parts = parts.map((p) => p.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+  if (parts.length === 0) return null;
+
+  // Find email part
+  const emailIndex = parts.findIndex((p) => p.includes('@') && p.includes('.'));
+  if (emailIndex === -1) return null;
+
+  const email = parts[emailIndex];
+  const remaining = parts.filter((_, idx) => idx !== emailIndex);
+
+  let password = '';
+  let refreshToken = '';
+  let clientId = DEFAULT_CLIENT_ID;
+  let recoveryEmail = '';
+
+  // 1. Look for UUID client_id (e.g. 1fec8e78-bce4-4aaf-ab1b-5451cc387264)
+  const clientIdIndex = remaining.findIndex((p) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p));
+  if (clientIdIndex !== -1) {
+    clientId = remaining[clientIdIndex];
+    remaining.splice(clientIdIndex, 1);
+  }
+
+  // 2. Look for recovery email if present
+  const recEmailIndex = remaining.findIndex((p) => p.includes('@') && p.includes('.'));
+  if (recEmailIndex !== -1) {
+    recoveryEmail = remaining[recEmailIndex];
+    remaining.splice(recEmailIndex, 1);
+  }
+
+  // 3. Look for OAuth refresh token (starts with 0.A or M.R or long string)
+  const tokenIndex = remaining.findIndex((p) => p.startsWith('0.') || p.startsWith('M.') || p.length > 40);
+  if (tokenIndex !== -1) {
+    refreshToken = remaining[tokenIndex];
+    remaining.splice(tokenIndex, 1);
+  }
+
+  // 4. Any remaining item can be password
+  if (remaining.length > 0) {
+    password = remaining[0];
+  }
+
+  // 5. If refresh token wasn't identified by prefix, but remaining items exist
+  if (!refreshToken && remaining.length > 1) {
+    refreshToken = remaining[1];
+  } else if (!refreshToken && remaining.length === 1) {
+    refreshToken = remaining[0];
+    password = DEFAULT_PASSWORD;
+  }
+
+  return {
+    id: 'acc_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+    email,
+    password: password || DEFAULT_PASSWORD,
+    refreshToken: refreshToken || '',
+    clientId: clientId || DEFAULT_CLIENT_ID,
+    recoveryEmail: recoveryEmail || '',
+    lastStatus: 'idle',
+    lastOtp: null,
+    lastIcon: null,
+    lastCheckedTime: null,
+    lastError: null,
+    lastSeenCode: null
+  };
+}
+
 function parseAccountsInput(rawText) {
   const lines = rawText.split('\n');
   const parsed = [];
 
-  for (let line of lines) {
-    line = line.trim();
-    if (!line) continue;
-
-    // Format: email|password|token|client_id|recovery_email
-    const parts = line.split('|');
-    if (parts.length >= 2) {
-      const email = parts[0].trim();
-      const password = parts[1] ? parts[1].trim() : '';
-      const refreshToken = parts[2] ? parts[2].trim() : '';
-      const clientId = parts[3] ? parts[3].trim() : '';
-      const recoveryEmail = parts[4] ? parts[4].trim() : '';
-
-      if (email.includes('@')) {
-        parsed.push({
-          id: 'acc_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
-          email,
-          password,
-          refreshToken,
-          clientId,
-          recoveryEmail,
-          lastStatus: 'idle',
-          lastOtp: null,
-          lastIcon: null,
-          lastCheckedTime: null,
-          lastError: null,
-          lastSeenCode: null
-        });
-      }
-    }
+  for (const line of lines) {
+    const acc = parseSingleAccountLine(line);
+    if (acc) parsed.push(acc);
   }
 
   return parsed;
@@ -637,9 +1011,9 @@ function addSampleAccounts() {
   const sampleText = [
     'john.worker01@hotmail.com|Pass1234!|0.AX4Aw5...sample_token_1|1fec8e78-bce4-4aaf-ab1b-5451cc387264',
     'sarah.leads99@outlook.com|Secret9988!|0.AX4Aw5...sample_token_2|1fec8e78-bce4-4aaf-ab1b-5451cc387264|rec_sarah@gmail.com',
-    'david.task2026@hotmail.com|MyPass77#|0.AX4Aw5...sample_token_3|1fec8e78-bce4-4aaf-ab1b-5451cc387264',
-    'alexa.verify@live.com|Alpha2026!|0.AX4Aw5...sample_token_4|1fec8e78-bce4-4aaf-ab1b-5451cc387264',
-    'mark.hotmail.ops@hotmail.com|P@ssw0rd2026|0.AX4Aw5...sample_token_5|1fec8e78-bce4-4aaf-ab1b-5451cc387264|mark_recovery@gmail.com'
+    'david.task2026@hotmail.com|MyPass77#|0.AX4Aw5...sample_token_3',
+    'alexa.verify@live.com|0.AX4Aw5...sample_token_4',
+    'mark.hotmail.ops@hotmail.com|P@ssw0rd2026|0.AX4Aw5...sample_token_5'
   ].join('\n');
 
   const textarea = document.getElementById('bulkAccountsInput');
@@ -675,6 +1049,7 @@ function saveBulkAccounts() {
   }
 
   saveToStorage();
+  syncWithServerMonitor();
   renderAccountsList();
   updateMetrics();
   closeAddModal();
@@ -685,6 +1060,7 @@ function saveBulkAccounts() {
 function deleteAccount(accountId) {
   accounts = accounts.filter((a) => a.id !== accountId);
   saveToStorage();
+  syncWithServerMonitor();
   renderAccountsList();
   updateMetrics();
   showToast('Account removed', 'info');
@@ -696,6 +1072,7 @@ function clearAllAccounts() {
     if (settings.isMonitoring) stopMonitoring();
     accounts = [];
     saveToStorage();
+    syncWithServerMonitor();
     renderAccountsList();
     updateMetrics();
     showToast('All accounts cleared', 'info');
@@ -752,47 +1129,49 @@ function renderAccountsList() {
       statusIcon = 'fa-solid fa-triangle-exclamation';
     }
 
+    const serviceIcon = acc.lastIcon || 'fa-brands fa-microsoft';
+
     return `
-      <div class="account-card ${isChecking ? 'checking' : ''} ${hasOtp ? 'has-otp' : ''}" id="card_${acc.id}">
-        <div class="account-header-row">
+      <div class="account-card ${hasOtp ? 'has-otp' : ''}" id="acc_card_${acc.id}">
+        <div class="account-card-header">
           <div class="account-email-wrap">
-            <div class="account-type-icon">
-              <i class="${acc.lastIcon || 'fa-brands fa-microsoft'}"></i>
+            <div class="account-service-icon">
+              <i class="${serviceIcon}"></i>
             </div>
-            <div class="account-email-text" title="${acc.email}">
-              ${escapeHtml(acc.email)}
+            <div>
+              <div class="account-email-text" title="${escapeHtml(acc.email)}">${escapeHtml(acc.email)}</div>
+              ${acc.recoveryEmail ? `<div style="font-size: 0.7rem; color: var(--text-dim);"><i class="fa-solid fa-shield-cat"></i> ${escapeHtml(acc.recoveryEmail)}</div>` : ''}
             </div>
           </div>
-          <div class="account-status-badge ${statusClass}">
+          <div class="account-status-chip ${statusClass}">
             <i class="${statusIcon}"></i>
             <span>${statusText}</span>
           </div>
         </div>
 
         ${hasOtp ? `
-          <div class="account-otp-box">
-            <div class="otp-left">
-              <span class="otp-service-tag">
-                <i class="${acc.lastIcon || 'fa-solid fa-key'}"></i> OTP:
-              </span>
-              <span class="otp-number">${escapeHtml(acc.lastOtp)}</span>
+          <div class="otp-display-box">
+            <div class="otp-code-glow">
+              <i class="${serviceIcon}" style="font-size: 1.1rem; color: var(--accent-cyan);"></i>
+              <span style="font-size: 0.78rem; color: var(--text-muted); font-weight: 600;">OTP:</span>
+              <span class="otp-code-number">${escapeHtml(acc.lastOtp)}</span>
             </div>
-            <button class="copy-mini-btn" onclick="copyAccountCode('${escapeHtml(acc.lastOtp)}')">
+            <button class="copy-otp-btn" onclick="copyAccountCode('${escapeHtml(acc.lastOtp)}')">
               <i class="fa-regular fa-copy"></i> Copy
             </button>
           </div>
         ` : ''}
 
-        <div class="account-footer-row">
-          <span>
+        <div class="account-card-footer">
+          <span class="checked-time">
             ${acc.lastCheckedTime ? `Checked: ${acc.lastCheckedTime}` : 'Not checked yet'}
           </span>
-          <div class="account-actions">
-            <button class="text-btn" onclick="checkSingleAccount('${acc.id}')" title="Check this account now">
-              <i class="fa-solid fa-arrows-rotate"></i> Check
+          <div class="card-action-btns">
+            <button class="card-action-btn" title="Check OTP Now" onclick="checkSingleAccount('${acc.id}')">
+              <i class="fa-solid fa-rotate ${isChecking ? 'fa-spin' : ''}"></i> Check
             </button>
-            <button class="text-btn danger" onclick="deleteAccount('${acc.id}')" title="Remove account">
-              <i class="fa-solid fa-trash-can"></i>
+            <button class="card-action-btn delete" title="Delete Account" onclick="deleteAccount('${acc.id}')">
+              <i class="fa-solid fa-trash"></i>
             </button>
           </div>
         </div>
@@ -803,70 +1182,62 @@ function renderAccountsList() {
 
 function renderHistoryList() {
   const container = document.getElementById('historyList');
-  document.getElementById('historyCountBadge').textContent = history.length.toString();
+  const emptyState = document.getElementById('historyEmptyState');
 
   if (history.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state" style="padding: 24px;">
-        <i class="fa-solid fa-clock-rotate-left" style="font-size: 1.8rem; color: var(--text-dim);"></i>
-        <div class="empty-title">No OTPs Captured Yet</div>
-        <div class="empty-desc">Captured OTPs will be listed here with timestamps and one-click copy.</div>
-      </div>
-    `;
+    container.innerHTML = '';
+    container.appendChild(emptyState);
+    emptyState.style.display = 'flex';
+    document.getElementById('historyCountBadge').textContent = '0';
     return;
   }
 
-  container.innerHTML = history.map((item) => {
-    return `
-      <div class="history-card">
-        <div class="history-details">
-          <div class="history-service-icon">
-            <i class="${item.icon || 'fa-solid fa-key'}"></i>
-          </div>
-          <div class="history-text-col">
-            <div class="history-otp-line">
-              <span class="history-code">${escapeHtml(item.code)}</span>
-              <span class="history-time">${escapeHtml(item.time)}</span>
-            </div>
-            <div class="history-email">${escapeHtml(item.email)}</div>
-          </div>
-        </div>
-        <button class="copy-mini-btn" onclick="copyAccountCode('${escapeHtml(item.code)}')">
-          <i class="fa-regular fa-copy"></i> Copy
+  emptyState.style.display = 'none';
+  document.getElementById('historyCountBadge').textContent = history.length.toString();
+
+  container.innerHTML = history.map((item) => `
+    <div class="history-item">
+      <div class="history-icon-box">
+        <i class="${item.icon || 'fa-solid fa-key'}"></i>
+      </div>
+      <div class="history-details">
+        <div class="history-email">${escapeHtml(item.email)}</div>
+        <div class="history-time"><i class="fa-regular fa-clock"></i> ${item.time} (${item.date || 'Today'})</div>
+      </div>
+      <div class="history-otp-wrap">
+        <span class="history-code">${escapeHtml(item.code)}</span>
+        <button class="copy-otp-btn" style="padding: 4px 8px; font-size: 0.72rem;" onclick="copyAccountCode('${escapeHtml(item.code)}')">
+          <i class="fa-regular fa-copy"></i>
         </button>
       </div>
-    `;
-  }).join('');
+    </div>
+  `).join('');
 }
 
 function updateMetrics() {
-  document.getElementById('metricAccounts').textContent = accounts.length.toString();
-  document.getElementById('metricOtps').textContent = history.length.toString();
+  document.getElementById('metricTotal').textContent = accounts.length.toString();
+  document.getElementById('metricCaptured').textContent = history.length.toString();
 }
 
-function updateMonitoringUI(isRunning) {
-  const pulseDot = document.getElementById('pulseDot');
+function updateMonitoringUI(isActive) {
+  const btn = document.getElementById('startMonitorBtn');
+  const btnIcon = document.getElementById('startBtnIcon');
+  const btnText = document.getElementById('startBtnText');
+  const dot = document.getElementById('pulseDot');
   const statusText = document.getElementById('monitorStatusText');
-  const startBtn = document.getElementById('startMonitorBtn');
-  const startBtnIcon = document.getElementById('startBtnIcon');
-  const startBtnText = document.getElementById('startBtnText');
 
-  if (isRunning) {
-    pulseDot.classList.add('running');
+  if (isActive) {
+    btn.classList.add('running');
+    btnIcon.className = 'fa-solid fa-pause';
+    btnText.textContent = 'PAUSE LIVE MONITORING';
+    dot.classList.add('active');
     statusText.textContent = `Monitoring ${accounts.length} Accounts Active`;
-    statusText.style.color = '#10b981';
-    
-    startBtn.classList.add('running');
-    startBtnIcon.className = 'fa-solid fa-pause';
-    startBtnText.textContent = 'STOP MONITORING';
   } else {
-    pulseDot.classList.remove('running');
+    btn.classList.remove('running');
+    btnIcon.className = 'fa-solid fa-play';
+    btnText.textContent = 'START LIVE MONITORING';
+    dot.classList.remove('active');
     statusText.textContent = 'Ready to Monitor';
-    statusText.style.color = '';
-    
-    startBtn.classList.remove('running');
-    startBtnIcon.className = 'fa-solid fa-play';
-    startBtnText.textContent = 'START LIVE MONITORING';
   }
 }
 
@@ -876,25 +1247,31 @@ function applySettingsToUI() {
   updateToggleUI('toggleVibrate', settings.vibrate);
   updateToggleUI('toggleSystemNotif', settings.systemNotif);
 
-  document.getElementById('intervalSelect').value = settings.pollInterval.toString();
-  
-  // Sound button in header
-  const soundHeaderBtn = document.getElementById('soundHeaderBtn');
-  const soundHeaderIcon = document.getElementById('soundHeaderIcon');
-  if (settings.soundAlert) {
-    soundHeaderBtn.classList.add('active');
-    soundHeaderIcon.className = 'fa-solid fa-volume-high';
-  } else {
-    soundHeaderBtn.classList.remove('active');
-    soundHeaderIcon.className = 'fa-solid fa-volume-xmark';
+  const soundBtn = document.getElementById('soundHeaderBtn');
+  const soundIcon = document.getElementById('soundHeaderIcon');
+  if (soundBtn && soundIcon) {
+    if (settings.soundAlert) {
+      soundBtn.classList.add('active');
+      soundIcon.className = 'fa-solid fa-volume-high';
+    } else {
+      soundBtn.classList.remove('active');
+      soundIcon.className = 'fa-solid fa-volume-xmark';
+    }
+  }
+
+  const intervalSelect = document.getElementById('intervalSelect');
+  if (intervalSelect) {
+    intervalSelect.value = settings.pollInterval.toString();
   }
 }
 
 function updateToggleUI(elementId, isActive) {
   const el = document.getElementById(elementId);
-  if (el) {
-    if (isActive) el.classList.add('active');
-    else el.classList.remove('active');
+  if (!el) return;
+  if (isActive) {
+    el.classList.add('active');
+  } else {
+    el.classList.remove('active');
   }
 }
 
@@ -931,7 +1308,6 @@ async function fetchNetworkInfo() {
     document.getElementById('qrImage').src = data.qrDataUrl;
     document.getElementById('phoneUrlText').textContent = data.fullUrl;
     
-    // Copy URL handler
     document.getElementById('copyUrlBtn').onclick = () => {
       copyToClipboard(data.fullUrl);
       showToast('Phone URL copied to clipboard!', 'success');
@@ -985,13 +1361,12 @@ function showToast(message, type = 'info') {
   }, 3200);
 }
 
-// Global helper for card copy buttons
+// Global helpers for inline buttons
 window.copyAccountCode = function(code) {
   copyToClipboard(code);
   showToast(`Copied: ${code}`, 'success');
 };
 
-// Global helper for card check buttons
 window.checkSingleAccount = checkSingleAccount;
 window.deleteAccount = deleteAccount;
 
@@ -1007,6 +1382,16 @@ function initDomEvents() {
       startMonitoring();
     }
   });
+
+  // Header permissions button
+  document.getElementById('permissionHeaderBtn').addEventListener('click', openPermissionModal);
+  document.getElementById('closePermissionModalBtn').addEventListener('click', closePermissionModal);
+  document.getElementById('skipPermissionBtn').addEventListener('click', closePermissionModal);
+  document.getElementById('grantAllPermissionsBtn').addEventListener('click', grantAllPermissions);
+
+  // Wake Lock modal
+  document.getElementById('closeWakeLockModalBtn').addEventListener('click', closeWakeLockModal);
+  document.getElementById('gotItWakeLockBtn').addEventListener('click', closeWakeLockModal);
 
   // Toggles
   document.getElementById('toggleAutoCopy').addEventListener('click', () => {
@@ -1042,30 +1427,38 @@ function initDomEvents() {
     settings.systemNotif = !settings.systemNotif;
     updateToggleUI('toggleSystemNotif', settings.systemNotif);
     saveToStorage();
-    if (settings.systemNotif) {
-      await requestNotificationPermission();
+    if (settings.systemNotif && 'Notification' in window && Notification.permission !== 'granted') {
+      await Notification.requestPermission();
+      updatePermissionBadges();
     }
   });
 
-  // Wake lock toggle
-  document.getElementById('wakeLockBtn').addEventListener('click', () => {
+  // Wake lock header button (toggles or shows explanation)
+  document.getElementById('wakeLockBtn').addEventListener('click', async () => {
     if (wakeLockSentinel) {
       releaseWakeLock();
-      showToast('Screen Wake Lock disabled', 'info');
+      showToast('Screen Wake Lock বন্ধ করা হয়েছে', 'info');
     } else {
-      requestWakeLock();
-      showToast('Screen Wake Lock enabled (screen won’t sleep)', 'success');
+      const success = await requestWakeLock();
+      if (success) {
+        showToast('Screen Wake Lock সক্রিয়: ফোনের ডিসপ্লে স্লিপ হবে না', 'success');
+      } else {
+        openWakeLockModal();
+      }
     }
+    updatePermissionBadges();
   });
 
   // Interval change
   document.getElementById('intervalSelect').addEventListener('change', (e) => {
     settings.pollInterval = parseInt(e.target.value, 10);
     saveToStorage();
+    syncWithServerMonitor();
     showToast(`Poll Interval set to ${settings.pollInterval / 1000}s`, 'info');
     if (settings.isMonitoring) {
       if (monitoringInterval) clearInterval(monitoringInterval);
       monitoringInterval = setInterval(runMonitoringCycle, settings.pollInterval);
+      if (bgWorker) bgWorker.postMessage({ action: 'start', interval: settings.pollInterval });
     }
   });
 

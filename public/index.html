@@ -83,17 +83,21 @@
       </div>
 
       <div class="header-actions">
+        <!-- Permissions Setup Button -->
+        <button class="icon-button" id="permissionHeaderBtn" title="Permissions Setup" aria-label="Permissions Setup">
+          <i class="fa-solid fa-shield-halved"></i>
+          <span class="badge-dot" id="permBadgeDot"></span>
+        </button>
         <!-- Phone QR Connect Button -->
         <button class="icon-button" id="phoneConnectBtn" title="Open on Phone" aria-label="Open on Phone">
           <i class="fa-solid fa-mobile-screen"></i>
-          <span class="badge-dot"></span>
         </button>
         <!-- Sound Toggle -->
         <button class="icon-button active" id="soundHeaderBtn" title="Toggle Sound" aria-label="Toggle Sound">
           <i class="fa-solid fa-volume-high" id="soundHeaderIcon"></i>
         </button>
         <!-- Wake Lock Indicator -->
-        <button class="icon-button" id="wakeLockBtn" title="Screen Wake Lock" aria-label="Keep screen awake">
+        <button class="icon-button" id="wakeLockBtn" title="Screen Wake Lock (Click to toggle/info)" aria-label="Keep screen awake">
           <i class="fa-solid fa-sun" id="wakeLockIcon"></i>
         </button>
       </div>
@@ -286,17 +290,21 @@
       </div>
 
       <div class="format-hint">
-        <strong>Supported Format (1 line per account):</strong><br>
-        <span class="format-code">email|password|refresh_token|client_id|recovery_email</span>
+        <strong>সাপোর্টেড ফরম্যাট (প্রতি লাইনে ১টি একাউন্ট):</strong><br>
+        <span class="format-code">email|password|refresh_token|client_id</span><br>
+        <small style="color: var(--accent-cyan); display: inline-block; margin-top: 4px;">
+          ✓ শুধু <code>email|password|token</code> বা <code>email|token</code> দিলেও হবে (client_id অটোমেটিক বসে যাবে)।<br>
+          ✓ <code>|</code>, <code>----</code>, <code>:</code> অথবা Excel/Sheets থেকে সরাসরি কপি-পেস্ট করতে পারবেন।
+        </small>
       </div>
 
       <textarea 
         class="textarea-field" 
         id="bulkAccountsInput" 
-        placeholder="Paste your 10 or more accounts here, e.g:
-user1@hotmail.com|pass1|token1|client_id_uuid|rec1@gmail.com
-user2@outlook.com|pass2|token2|client_id_uuid
-user3@live.com|pass3|token3|client_id_uuid"></textarea>
+        placeholder="এখানে ১০টি বা তার বেশি একাউন্ট পেস্ট করুন, যেমন:
+user1@hotmail.com|Pass123!|0.AX4Aw5...|1fec8e78-bce4-4aaf-ab1b-5451cc387264
+user2@outlook.com|Secret456#|0.AX4Aw5...
+user3@live.com|0.AX4Aw5..."></textarea>
 
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <button class="btn-secondary" id="loadSampleAccountsBtn">
@@ -356,6 +364,133 @@ user3@live.com|pass3|token3|client_id_uuid"></textarea>
       </div>
     </div>
   </div>
+
+  <!-- ========================================================================
+       MODAL: ALL PERMISSION SETUP (SHOWN ON FIRST LAUNCH)
+       ======================================================================== -->
+  <div class="modal-overlay" id="permissionModal">
+    <div class="modal-box" style="max-width: 480px;">
+      <div class="modal-header">
+        <div class="modal-title" style="color: var(--accent-cyan);">
+          <i class="fa-solid fa-shield-halved"></i>
+          <span>স্মার্ট পারমিশন সেটআপ (Required Permissions)</span>
+        </div>
+        <button class="modal-close-btn" id="closePermissionModalBtn" aria-label="Close modal">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div style="padding: 6px 0;">
+        <p style="font-size: 0.84rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 14px;">
+          আপনি যখন অন্য অ্যাপে (যেমন <strong>Instagram</strong>) কাজ করবেন বা অ্যাপ মিনিমাইজ রাখবেন, তখন যাতে ওটিপি আসার সাথে সাথে <strong>ফোনে এসএমএস নোটিফিকেশন বাজে</strong> এবং <strong>অটো-কপি</strong> কাজ করে — সেজন্য নিচের পারমিশনগুলো প্রয়োজন:
+        </p>
+
+        <div class="permission-item-list">
+          <!-- Item 1: Push Notification -->
+          <div class="permission-card">
+            <div class="permission-icon-box" style="background: rgba(99,102,241,0.15); color: #818cf8;">
+              <i class="fa-solid fa-bell"></i>
+            </div>
+            <div class="permission-card-body">
+              <div class="permission-card-title">
+                <span>১. Push Notification (মোবাইল নোটিফিকেশন)</span>
+                <span class="perm-status-badge" id="permNotifBadge">Required</span>
+              </div>
+              <div class="permission-card-desc">ইনস্টাগ্রাম বা অন্য অ্যাপে থাকলেও সরাসরি স্ক্রিনের উপরে ওটিপির এসএমএস পপআপ শো করবে।</div>
+            </div>
+          </div>
+
+          <!-- Item 2: Sound & Audio Alert -->
+          <div class="permission-card">
+            <div class="permission-icon-box" style="background: rgba(16,185,129,0.15); color: #34d399;">
+              <i class="fa-solid fa-volume-high"></i>
+            </div>
+            <div class="permission-card-body">
+              <div class="permission-card-title">
+                <span>২. SMS Sound Alert & Background Keep-Alive</span>
+                <span class="perm-status-badge" id="permSoundBadge">Required</span>
+              </div>
+              <div class="permission-card-desc">ওটিপি আসলে মিষ্টি রিংটোন বাজাবে এবং ব্যাকগ্রাউন্ডে ব্রাউজার স্লিপে যাওয়া প্রতিরোধ করবে।</div>
+            </div>
+          </div>
+
+          <!-- Item 3: Screen Wake Lock -->
+          <div class="permission-card">
+            <div class="permission-icon-box" style="background: rgba(245,158,11,0.15); color: #fbbf24;">
+              <i class="fa-solid fa-sun"></i>
+            </div>
+            <div class="permission-card-body">
+              <div class="permission-card-title">
+                <span>৩. Screen Wake Lock (স্ক্রিন অন রাখা)</span>
+                <span class="perm-status-badge" id="permWakeBadge">Optional</span>
+              </div>
+              <div class="permission-card-desc">স্ক্রিন অটোমেটিক লক/অফ হওয়া বন্ধ রাখে যাতে লাইভ মনিটরিং ফাস্ট ও নিরবচ্ছিন্ন থাকে।</div>
+            </div>
+          </div>
+
+          <!-- Item 4: Instant Auto-Copy -->
+          <div class="permission-card">
+            <div class="permission-icon-box" style="background: rgba(6,182,212,0.15); color: #22d3ee;">
+              <i class="fa-solid fa-copy"></i>
+            </div>
+            <div class="permission-card-body">
+              <div class="permission-card-title">
+                <span>৪. Instant Clipboard Auto-Copy</span>
+                <span class="perm-status-badge active">Auto</span>
+              </div>
+              <div class="permission-card-desc">কোড পাওয়ার সাথে সাথে অটো-কপি হয়ে যাবে, ইনস্টাগ্রামে শুধু সরাসরি পেস্ট (Paste) করবেন।</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer" style="flex-direction: column; gap: 8px;">
+        <button class="btn-primary" id="grantAllPermissionsBtn" style="width: 100%; justify-content: center; padding: 13px; font-size: 0.95rem; font-weight: 700; box-shadow: 0 4px 20px rgba(99,102,241,0.4);">
+          <i class="fa-solid fa-circle-check"></i> সব পারমিশন চালু করুন (Grant All Permissions)
+        </button>
+        <button class="btn-secondary" id="skipPermissionBtn" style="width: 100%; justify-content: center; font-size: 0.8rem;">
+          পরে করব (Skip for now)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       MODAL: WAKE LOCK EXPLANATION MODAL
+       ======================================================================== -->
+  <div class="modal-overlay" id="wakeLockModal">
+    <div class="modal-box" style="max-width: 440px;">
+      <div class="modal-header">
+        <div class="modal-title" style="color: #f59e0b;">
+          <i class="fa-solid fa-sun"></i>
+          <span>Screen Wake Lock এর কাজ কী?</span>
+        </div>
+        <button class="modal-close-btn" id="closeWakeLockModalBtn" aria-label="Close modal">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div style="font-size: 0.86rem; color: var(--text-muted); line-height: 1.6; padding: 8px 0;">
+        <p style="margin-bottom: 10px;">
+          📱 <strong>Screen Wake Lock</strong> এর কাজ হলো: এটি চালু রাখলে আপনার ফোন বা কম্পিউটারের স্ক্রিন <strong>নিজে নিজে বন্ধ বা স্লিপ (Lock/Sleep) হবে না</strong>।
+        </p>
+        <p style="margin-bottom: 10px;">
+          💡 <strong>কেন এটা প্রয়োজন?</strong><br>
+          স্মার্টফোনে সাধারণত ৩০ সেকেন্ড বা ১ মিনিট টাচ না করলে স্ক্রিন অফ হয়ে যায়। স্ক্রিন অফ হলে ফোন স্লিপ মোডে চলে গিয়ে ব্যাকগ্রাউন্ডে ব্রাউজারের নেটওয়ার্ক পোলিং থামিয়ে দিতে পারে। ওয়েক লক অন থাকলে ডিসপ্লে সার্বক্ষণিক সজাগ থাকে, ফলে ওটিপি আসার ১ সেকেন্ডের মধ্যেই আপনি অ্যালার্ট পাবেন!
+        </p>
+        <div style="background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.25); border-radius: 8px; padding: 10px 12px; color: #fde68a; font-size: 0.8rem;">
+          <i class="fa-solid fa-lightbulb"></i> ওয়েক লক অন/অফ করতে উপরের ডানপাশের সূর্যের আইকনে ক্লিক করতে পারেন।
+        </div>
+      </div>
+
+      <div class="modal-footer" style="justify-content: flex-end;">
+        <button class="btn-primary" id="gotItWakeLockBtn">বুঝেছি (Got It)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden inaudible audio element to keep mobile Chrome/PWA alive in background -->
+  <audio id="bgKeepAliveAudio" loop playsinline preload="auto" src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA=="></audio>
 
   <!-- Toast Notification Container -->
   <div class="toast-container" id="toastContainer"></div>

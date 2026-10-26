@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mailcode-otp-v1';
+const CACHE_NAME = 'mailcode-otp-v2';
 const ASSETS = [
   '/',
   '/index.html',
@@ -41,7 +41,23 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Handle push notification clicks (auto copy or focus window)
+// Listen for messages from client page to show heads-up background notification
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SHOW_NOTIFICATION') {
+    const { title, options } = event.data;
+    self.registration.showNotification(title, {
+      icon: '/icons/icon-192.svg',
+      badge: '/icons/icon-192.svg',
+      vibrate: [200, 100, 200, 100, 200],
+      requireInteraction: true,
+      tag: 'otp-alert-' + Date.now(),
+      renotify: true,
+      ...options
+    });
+  }
+});
+
+// Handle push notification clicks (auto copy and focus window)
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const code = event.notification.data ? event.notification.data.code : '';
@@ -57,8 +73,15 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (clients.openWindow) {
-        return clients.openWindow('/');
+        return clients.openWindow('/').then((windowClient) => {
+          if (windowClient && code) {
+            setTimeout(() => {
+              windowClient.postMessage({ type: 'COPY_CODE', code: code });
+            }, 500);
+          }
+        });
       }
     })
   );
 });
+
