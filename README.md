@@ -1,4 +1,4 @@
-# 📱 MailCode Live OTP Monitor & Auto-Copy App
+# 📱 MD Sojib - Live OTP Monitor & Auto-Copy App
 
 **code.yamin.bd** API-এর সাথে সংযুক্ত রিয়েল-টাইম Hotmail ও Outlook ওটিপি মনিটরিং এবং ইনস্ট্যান্ট নোটিফিকেশন অ্যাপ।
 

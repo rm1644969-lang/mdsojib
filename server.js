@@ -381,7 +381,7 @@ app.post('/api/proxy-fetch', async (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   const localIp = getLocalIp();
   console.log(`=======================================================`);
-  console.log(`🚀 MailCode OTP Monitor App is running!`);
+  console.log(`🚀 MD Sojib Live OTP App is running!`);
   console.log(`💻 Local PC Access:    http://localhost:${PORT}`);
   console.log(`📱 Phone Access:       http://${localIp}:${PORT}`);
   console.log(`   (Open the phone URL on the same Wi-Fi to use as an app)`);

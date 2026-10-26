@@ -274,7 +274,7 @@ function startBackgroundKeepAlive() {
     if ('mediaSession' in navigator) {
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: '⚡ MailCode OTP Live Monitor (Active)',
+          title: '⚡ MD Sojib Live Monitor (Active)',
           artist: 'Background Auto-Copy Active',
           album: 'Real-time 24/7 Monitoring'
         });

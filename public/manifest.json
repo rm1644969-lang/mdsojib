@@ -1,6 +1,6 @@
 {
-  "name": "MailCode OTP Grabber",
-  "short_name": "MailCode",
+  "name": "MD Sojib",
+  "short_name": "MD Sojib",
   "description": "Real-time OTP monitor and auto-copy for Hotmail & Outlook accounts using code.yamin.bd",
   "start_url": "/",
   "display": "standalone",
