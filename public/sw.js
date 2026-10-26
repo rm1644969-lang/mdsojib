@@ -1,4 +1,4 @@
-const CACHE_NAME = 'mailcode-otp-v5';
+const CACHE_NAME = 'mailcode-otp-v7';
 const ASSETS = [
   '/',
   '/index.html',
@@ -34,6 +34,21 @@ self.addEventListener('fetch', (event) => {
   if (event.request.url.includes('code.yamin.bd') || event.request.url.includes('/api/')) {
     return;
   }
+
+  // Network-first for JS and HTML so updates are applied immediately
+  if (event.request.mode === 'navigate' || event.request.url.includes('app.js') || event.request.url.includes('index.html')) {
+    event.respondWith(
+      fetch(event.request).then((response) => {
+        if (response && response.status === 200) {
+          const resClone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, resClone));
+        }
+        return response;
+      }).catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       return cached || fetch(event.request);

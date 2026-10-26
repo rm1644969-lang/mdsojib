@@ -49,15 +49,6 @@ document.addEventListener('DOMContentLoaded', () => {
   checkApiHealth();
   fetchNetworkInfo();
   checkPermissionsOnLoad();
-
-  // If user previously had accounts loaded, auto-start live monitoring
-  if (accounts.length > 0) {
-    setTimeout(() => {
-      if (!settings.isMonitoring) {
-        startMonitoring();
-      }
-    }, 800);
-  }
 });
 
 // Load saved data
@@ -1249,7 +1240,8 @@ function updateDetectedCount() {
 }
 
 function saveBulkAccounts() {
-  const rawText = document.getElementById('bulkAccountsInput').value;
+  const inputEl = document.getElementById('bulkAccountsInput');
+  const rawText = inputEl.value;
   const newAccounts = parseAccountsInput(rawText);
 
   if (newAccounts.length === 0) {
@@ -1257,14 +1249,22 @@ function saveBulkAccounts() {
     return;
   }
 
-  // Deduplicate against existing emails
-  const existingEmails = new Set(accounts.map((a) => a.email.toLowerCase()));
   let addedCount = 0;
+  let updatedCount = 0;
 
   for (const acc of newAccounts) {
-    if (!existingEmails.has(acc.email.toLowerCase())) {
+    const existingIndex = accounts.findIndex((a) => a.email.toLowerCase() === acc.email.toLowerCase());
+    if (existingIndex !== -1) {
+      accounts[existingIndex] = {
+        ...accounts[existingIndex],
+        password: acc.password || accounts[existingIndex].password,
+        refreshToken: acc.refreshToken || accounts[existingIndex].refreshToken,
+        clientId: acc.clientId || accounts[existingIndex].clientId,
+        recoveryEmail: acc.recoveryEmail || accounts[existingIndex].recoveryEmail
+      };
+      updatedCount++;
+    } else {
       accounts.push(acc);
-      existingEmails.add(acc.email.toLowerCase());
       addedCount++;
     }
   }
@@ -1275,7 +1275,15 @@ function saveBulkAccounts() {
   updateMetrics();
   closeAddModal();
 
-  showToast(`Added ${addedCount} accounts! Starting Live Monitor...`, 'success');
+  // Clear modal inputs
+  inputEl.value = '';
+  const detectedEl = document.getElementById('detectedCountText');
+  if (detectedEl) detectedEl.textContent = '0 accounts detected';
+
+  const msg = updatedCount > 0 
+    ? `Added ${addedCount} & updated ${updatedCount} accounts! Starting Live Monitor...`
+    : `Added ${addedCount} accounts! Starting Live Monitor...`;
+  showToast(msg, 'success');
 
   // Immediately start live monitoring so incoming OTPs are never missed
   startMonitoring();
@@ -1317,18 +1325,30 @@ function clearHistory() {
 // ============================================================================
 function renderAccountsList() {
   const container = document.getElementById('accountsList');
-  const emptyState = document.getElementById('emptyState');
+  if (!container) return;
+
+  const countBadge = document.getElementById('accountCountBadge');
 
   if (accounts.length === 0) {
-    container.innerHTML = '';
-    container.appendChild(emptyState);
-    emptyState.style.display = 'flex';
-    document.getElementById('accountCountBadge').textContent = '0';
+    container.innerHTML = `
+      <div class="empty-state" id="emptyState" style="display: flex;">
+        <div class="empty-icon">
+          <i class="fa-solid fa-inbox"></i>
+        </div>
+        <div class="empty-title">No Accounts Loaded</div>
+        <div class="empty-desc">
+          Paste your Hotmail / Outlook access tokens or credentials (10 or more) to start capturing OTP codes.
+        </div>
+        <button class="btn-primary" id="emptyLoadBtn" style="margin-top: 6px;" onclick="openAddModal()">
+          <i class="fa-solid fa-file-import"></i> Paste Hotmail Credentials
+        </button>
+      </div>
+    `;
+    if (countBadge) countBadge.textContent = '0';
     return;
   }
 
-  emptyState.style.display = 'none';
-  document.getElementById('accountCountBadge').textContent = accounts.length.toString();
+  if (countBadge) countBadge.textContent = accounts.length.toString();
 
   container.innerHTML = accounts.map((acc, index) => {
     const isChecking = acc.lastStatus === 'checking';
@@ -1406,18 +1426,27 @@ function renderAccountsList() {
 
 function renderHistoryList() {
   const container = document.getElementById('historyList');
-  const emptyState = document.getElementById('historyEmptyState');
+  if (!container) return;
+
+  const countBadge = document.getElementById('historyCountBadge');
 
   if (history.length === 0) {
-    container.innerHTML = '';
-    container.appendChild(emptyState);
-    emptyState.style.display = 'flex';
-    document.getElementById('historyCountBadge').textContent = '0';
+    container.innerHTML = `
+      <div class="empty-state" id="historyEmptyState" style="display: flex;">
+        <div class="empty-icon">
+          <i class="fa-solid fa-clock-rotate-left"></i>
+        </div>
+        <div class="empty-title">No OTPs Captured Yet</div>
+        <div class="empty-desc">
+          Captured OTP codes will appear here automatically with timestamp and one-click copy.
+        </div>
+      </div>
+    `;
+    if (countBadge) countBadge.textContent = '0';
     return;
   }
 
-  emptyState.style.display = 'none';
-  document.getElementById('historyCountBadge').textContent = history.length.toString();
+  if (countBadge) countBadge.textContent = history.length.toString();
 
   container.innerHTML = history.map((item) => `
     <div class="history-item">
@@ -1439,8 +1468,16 @@ function renderHistoryList() {
 }
 
 function updateMetrics() {
-  document.getElementById('metricTotal').textContent = accounts.length.toString();
-  document.getElementById('metricCaptured').textContent = history.length.toString();
+  const metricAccounts = document.getElementById('metricAccounts') || document.getElementById('metricTotal');
+  if (metricAccounts) metricAccounts.textContent = accounts.length.toString();
+
+  const metricOtps = document.getElementById('metricOtps') || document.getElementById('metricCaptured');
+  if (metricOtps) metricOtps.textContent = history.length.toString();
+
+  const metricActive = document.getElementById('metricActive');
+  if (metricActive && !settings.isMonitoring) {
+    metricActive.textContent = '0';
+  }
 }
 
 function updateMonitoringUI(isActive) {
@@ -1593,6 +1630,8 @@ window.copyAccountCode = function(code) {
 
 window.checkSingleAccount = checkSingleAccount;
 window.deleteAccount = deleteAccount;
+window.openAddModal = openAddModal;
+window.closeAddModal = closeAddModal;
 
 // ============================================================================
 // DOM EVENT LISTENERS
