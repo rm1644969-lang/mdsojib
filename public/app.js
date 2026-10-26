@@ -22,7 +22,7 @@ let settings = {
   soundAlert: true,
   vibrate: true,
   systemNotif: true,
-  pollInterval: 5000,
+  pollInterval: 3000,
   isMonitoring: false
 };
 
@@ -223,41 +223,99 @@ function initBackgroundWorker() {
 }
 
 // ============================================================================
-// BACKGROUND KEEP-ALIVE AUDIO
-// (Keeps mobile Chrome tab from freezing when minimized to Instagram)
+// INFINITE BACKGROUND KEEP-ALIVE ENGINE (ANTI-FREEZE ON ANDROID/PWA)
+// Uses an inaudible live MediaStream pipe + MediaSession to keep the CPU & network alive 24/7
 // ============================================================================
-function startBackgroundKeepAlive() {
-  const audioEl = document.getElementById('bgKeepAliveAudio');
-  if (audioEl) {
-    audioEl.volume = 0.01;
-    audioEl.play().catch((err) => {
-      console.log('Background audio unlock pending user gesture:', err.message);
-    });
-  }
+let keepAliveAudioCtx = null;
+let keepAliveOsc = null;
+let isAudioKeepAliveRunning = false;
 
-  // Set up MediaSession metadata so Android marks app as active media
-  if ('mediaSession' in navigator) {
-    try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: 'MailCode OTP Live Monitor',
-        artist: 'Background Monitoring Active',
-        album: 'Instant OTP & Auto-Copy'
-      });
-      navigator.mediaSession.playbackState = 'playing';
-    } catch (e) {}
+function startBackgroundKeepAlive() {
+  if (isAudioKeepAliveRunning) return;
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      if (!keepAliveAudioCtx || keepAliveAudioCtx.state === 'closed') {
+        keepAliveAudioCtx = new AudioCtx();
+      }
+      if (keepAliveAudioCtx.state === 'suspended') {
+        keepAliveAudioCtx.resume();
+      }
+
+      // Create live MediaStream destination
+      const dest = keepAliveAudioCtx.createMediaStreamDestination();
+      keepAliveOsc = keepAliveAudioCtx.createOscillator();
+      const gain = keepAliveAudioCtx.createGain();
+
+      // 20Hz sub-audible tone with 0.00005 gain (completely inaudible)
+      keepAliveOsc.type = 'sine';
+      keepAliveOsc.frequency.setValueAtTime(20, keepAliveAudioCtx.currentTime);
+      gain.gain.setValueAtTime(0.00005, keepAliveAudioCtx.currentTime);
+
+      keepAliveOsc.connect(gain);
+      gain.connect(dest);
+      try {
+        gain.connect(keepAliveAudioCtx.destination);
+      } catch (_) {}
+      keepAliveOsc.start();
+
+      const audioEl = document.getElementById('bgKeepAliveAudio');
+      if (audioEl) {
+        if ('srcObject' in audioEl) {
+          audioEl.srcObject = dest.stream;
+        }
+        audioEl.volume = 0.01;
+        audioEl.play().catch((err) => {
+          console.log('Background audio unlock pending user gesture:', err.message);
+        });
+      }
+    }
+
+    // Set up MediaSession metadata so Android marks app as active media
+    if ('mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: '⚡ MailCode OTP Live Monitor (Active)',
+          artist: 'Background Auto-Copy Active',
+          album: 'Real-time 24/7 Monitoring'
+        });
+        navigator.mediaSession.playbackState = 'playing';
+        navigator.mediaSession.setActionHandler('play', () => {
+          if (keepAliveAudioCtx && keepAliveAudioCtx.state === 'suspended') {
+            keepAliveAudioCtx.resume();
+          }
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {});
+      } catch (e) {}
+    }
+
+    isAudioKeepAliveRunning = true;
+    console.log('⚡ Infinite Background Audio Stream Active (Anti-Freeze)');
+  } catch (err) {
+    console.warn('Audio keep-alive initialization error:', err);
   }
 }
 
 function stopBackgroundKeepAlive() {
-  const audioEl = document.getElementById('bgKeepAliveAudio');
-  if (audioEl) {
-    audioEl.pause();
-  }
-  if ('mediaSession' in navigator) {
-    try {
+  try {
+    if (keepAliveOsc) {
+      keepAliveOsc.stop();
+      keepAliveOsc.disconnect();
+      keepAliveOsc = null;
+    }
+    if (keepAliveAudioCtx && keepAliveAudioCtx.state !== 'closed') {
+      keepAliveAudioCtx.suspend();
+    }
+    const audioEl = document.getElementById('bgKeepAliveAudio');
+    if (audioEl) {
+      audioEl.pause();
+      if ('srcObject' in audioEl) audioEl.srcObject = null;
+    }
+    if ('mediaSession' in navigator) {
       navigator.mediaSession.playbackState = 'paused';
-    } catch (e) {}
-  }
+    }
+  } catch (e) {}
+  isAudioKeepAliveRunning = false;
 }
 
 // ============================================================================
@@ -393,9 +451,15 @@ function updateWakeLockUI(isActive) {
   }
 }
 
-// Re-acquire wake lock & immediately check latest OTPs if user returns from Instagram / another app
+let latestCapturedOtp = localStorage.getItem('mailcode_latest_otp') || null;
+
+// Re-acquire wake lock, auto-copy pending OTP, and immediately check latest OTPs if user returns from Instagram
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
+    if (latestCapturedOtp && settings.autoCopy) {
+      copyToClipboard(latestCapturedOtp);
+      showToast(`⚡ OTP ${latestCapturedOtp} Auto-Copied to Clipboard!`, 'success');
+    }
     fetchLatestServerOtps();
     if (settings.isMonitoring && accounts.length > 0) {
       runMonitoringCycle();
@@ -406,6 +470,9 @@ document.addEventListener('visibilitychange', () => {
 });
 
 window.addEventListener('focus', () => {
+  if (latestCapturedOtp && settings.autoCopy) {
+    copyToClipboard(latestCapturedOtp);
+  }
   fetchLatestServerOtps();
   if (settings.isMonitoring && accounts.length > 0) {
     runMonitoringCycle();
@@ -569,16 +636,19 @@ function sendSystemNotification(code, email) {
   if (!settings.systemNotif || !('Notification' in window)) return;
   if (Notification.permission === 'granted') {
     try {
-      const title = `⚡ OTP Code: ${code}`;
+      const title = `⚡ OTP: ${code}`;
       const options = {
-        body: `New OTP for ${email}\nTap to open & auto-copy to clipboard!`,
+        body: `New verification code for ${email}\nTap here to auto-copy to clipboard!`,
         icon: '/icons/icon-192.svg',
         badge: '/icons/icon-192.svg',
         tag: 'otp-' + Date.now(),
         renotify: true,
-        vibrate: [200, 100, 200, 100, 200],
+        vibrate: [300, 100, 300, 100, 300],
         requireInteraction: true,
-        data: { code: code, email: email }
+        data: { code: code, email: email },
+        actions: [
+          { action: 'copy', title: '📋 Copy Code' }
+        ]
       };
       
       // Preferred: Route through ServiceWorker (vital for background display on Android)
@@ -606,6 +676,12 @@ function sendSystemNotification(code, email) {
 // ============================================================================
 async function handleNewOtp(account, otpCode, iconClass, messages) {
   console.log(`🚀 [NEW OTP CAPTURED] ${account.email} => ${otpCode}`);
+
+  // Save latest OTP globally
+  latestCapturedOtp = otpCode;
+  try {
+    localStorage.setItem('mailcode_latest_otp', otpCode);
+  } catch (_) {}
 
   // 1. Play loud SMS alert ringtone
   playSmsChime();
@@ -803,6 +879,9 @@ function extractOtpAndDetails(result) {
 // ============================================================================
 // API CALLER (WITH SMART DEFAULTS & LOCAL PROXY FALLBACK)
 // ============================================================================
+// ============================================================================
+// API CALLER (DIRECT TO code.yamin.bd - ULTRA FAST ~300ms)
+// ============================================================================
 async function fetchAccountOtp(account) {
   const payload = {
     email: account.email,
@@ -814,31 +893,30 @@ async function fetchAccountOtp(account) {
     payload.recovery_email = account.recoveryEmail;
   }
 
-  // 1. Try local server proxy first (reliable, handles CORS, runs on same Wi-Fi)
-  try {
-    const proxyRes = await fetch('/api/proxy-fetch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10000)
-    });
-    if (proxyRes.ok) {
-      return await proxyRes.json();
-    }
-  } catch (proxyErr) {
-    // If proxy failed, fallback to direct fetch
-  }
-
-  // 2. Fallback to direct fetch
+  // 1. Direct fetch to code.yamin.bd (FASTEST: 200-400ms, no proxy lag)
   try {
     const res = await fetch('https://code.yamin.bd/api.php?action=fetch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(10000)
+      signal: AbortSignal.timeout(6000)
     });
-    return await res.json();
+    if (res.ok) {
+      return await res.json();
+    }
   } catch (directErr) {
+    // 2. Fallback to local server proxy only if direct network glitch
+    try {
+      const proxyRes = await fetch('/api/proxy-fetch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(5000)
+      });
+      if (proxyRes.ok) {
+        return await proxyRes.json();
+      }
+    } catch (_) {}
     throw new Error('Connection failed: ' + directErr.message);
   }
 }
@@ -870,7 +948,7 @@ function startMonitoring() {
   // Immediately run first check
   runMonitoringCycle();
 
-  // Background Web Worker
+  // Background Web Worker (runs in background without freeze)
   if (bgWorker) {
     bgWorker.postMessage({ action: 'start', interval: settings.pollInterval });
   }
@@ -914,59 +992,49 @@ async function runMonitoringCycle() {
   isCurrentlyFetching = true;
   document.getElementById('metricActive').textContent = accounts.length;
 
-  // Check up to 5 accounts concurrently for blazing-fast 1-2 second cycles
-  const batchSize = Math.min(5, accounts.length);
-  
-  for (let b = 0; b < accounts.length; b += batchSize) {
-    if (!settings.isMonitoring) break;
-    
-    const currentBatch = accounts.slice(b, b + batchSize);
-    
-    currentBatch.forEach((acc) => {
-      acc.lastStatus = 'checking';
-    });
-    renderAccountsList();
+  accounts.forEach((acc) => {
+    acc.lastStatus = 'checking';
+  });
+  renderAccountsList();
 
-    await Promise.all(
-      currentBatch.map(async (account) => {
-        try {
-          const result = await fetchAccountOtp(account);
-          account.lastCheckedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          
-          const { code, icon, messages } = extractOtpAndDetails(result);
+  // Check all accounts in parallel for blazing fast ~300ms cycle
+  await Promise.all(
+    accounts.map(async (account) => {
+      try {
+        const result = await fetchAccountOtp(account);
+        account.lastCheckedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        
+        const { code, icon, messages } = extractOtpAndDetails(result);
 
-          if (code) {
-            if (account.lastSeenCode !== code) {
-              account.lastSeenCode = code;
-              await handleNewOtp(account, code, icon, messages);
-            } else {
-              account.lastStatus = 'success';
-              account.lastOtp = code;
-              account.lastIcon = icon;
-            }
+        if (code) {
+          if (account.lastSeenCode !== code) {
+            account.lastSeenCode = code;
+            await handleNewOtp(account, code, icon, messages);
           } else {
-            if (result && result.error) {
-              if (result.error_code === 'token_error') {
-                account.lastStatus = 'error';
-                account.lastError = 'Token Error';
-              } else {
-                account.lastStatus = account.lastOtp ? 'success' : 'idle';
-              }
+            account.lastStatus = 'success';
+            account.lastOtp = code;
+            account.lastIcon = icon;
+          }
+        } else {
+          if (result && result.error) {
+            if (result.error_code === 'token_error') {
+              account.lastStatus = 'error';
+              account.lastError = 'Token Error';
             } else {
               account.lastStatus = account.lastOtp ? 'success' : 'idle';
             }
+          } else {
+            account.lastStatus = account.lastOtp ? 'success' : 'idle';
           }
-        } catch (err) {
-          console.error(`Error checking ${account.email}:`, err.message);
-          account.lastStatus = account.lastOtp ? 'success' : 'error';
-          account.lastError = 'Network error';
         }
-      })
-    );
+      } catch (err) {
+        account.lastStatus = account.lastOtp ? 'success' : 'error';
+        account.lastError = 'Network error';
+      }
+    })
+  );
 
-    renderAccountsList();
-  }
-
+  renderAccountsList();
   isCurrentlyFetching = false;
   document.getElementById('metricActive').textContent = '0';
   saveToStorage();

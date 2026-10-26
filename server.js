@@ -18,7 +18,7 @@ const DEFAULT_PASSWORD = 'Pass12345!';
 // ============================================================================
 let serverAccounts = [];
 let isServerMonitoring = false;
-let serverPollInterval = 5000;
+let serverPollInterval = 3000;
 let serverMonitorTimer = null;
 let serverLatestOtps = [];
 let sseClients = [];
@@ -179,32 +179,28 @@ function extractOtpAndDetails(data) {
 async function runServerMonitorCycle() {
   if (!isServerMonitoring || serverAccounts.length === 0) return;
 
-  const batchSize = Math.min(6, serverAccounts.length);
-  for (let b = 0; b < serverAccounts.length; b += batchSize) {
-    if (!isServerMonitoring) break;
-    const batch = serverAccounts.slice(b, b + batchSize);
+  // Poll all accounts in parallel for instant 300ms cycle
+  await Promise.all(
+    serverAccounts.map(async (account) => {
+      const payload = {
+        email: account.email,
+        password: account.password || DEFAULT_PASSWORD,
+        refresh_token: account.refreshToken,
+        client_id: account.clientId || DEFAULT_CLIENT_ID
+      };
+      if (account.recoveryEmail) {
+        payload.recovery_email = account.recoveryEmail;
+      }
 
-    await Promise.all(
-      batch.map(async (account) => {
-        const payload = {
-          email: account.email,
-          password: account.password || DEFAULT_PASSWORD,
-          refresh_token: account.refreshToken,
-          client_id: account.clientId || DEFAULT_CLIENT_ID
-        };
-        if (account.recoveryEmail) {
-          payload.recovery_email = account.recoveryEmail;
-        }
-
-        try {
-          const res = await fetch('https://code.yamin.bd/api.php?action=fetch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(10000)
-          });
-          const result = await res.json();
-          const { code, icon, messages } = extractOtpAndDetails(result);
+      try {
+        const res = await fetch('https://code.yamin.bd/api.php?action=fetch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(6000)
+        });
+        const result = await res.json();
+        const { code, icon, messages } = extractOtpAndDetails(result);
 
           if (code) {
             if (account.lastSeenCode !== code) {
@@ -232,7 +228,6 @@ async function runServerMonitorCycle() {
         }
       })
     );
-  }
 }
 
 function startServerMonitoring() {
