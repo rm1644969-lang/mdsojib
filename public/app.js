@@ -49,6 +49,15 @@ document.addEventListener('DOMContentLoaded', () => {
   checkApiHealth();
   fetchNetworkInfo();
   checkPermissionsOnLoad();
+
+  // If user previously had accounts loaded, auto-start live monitoring
+  if (accounts.length > 0) {
+    setTimeout(() => {
+      if (!settings.isMonitoring) {
+        startMonitoring();
+      }
+    }, 800);
+  }
 });
 
 // Load saved data
@@ -384,14 +393,22 @@ function updateWakeLockUI(isActive) {
   }
 }
 
-// Re-acquire wake lock & sync latest OTPs if user returns from Instagram / another app
+// Re-acquire wake lock & immediately check latest OTPs if user returns from Instagram / another app
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     fetchLatestServerOtps();
-    if (settings.isMonitoring) {
+    if (settings.isMonitoring && accounts.length > 0) {
+      runMonitoringCycle();
       requestWakeLock();
       startBackgroundKeepAlive();
     }
+  }
+});
+
+window.addEventListener('focus', () => {
+  fetchLatestServerOtps();
+  if (settings.isMonitoring && accounts.length > 0) {
+    runMonitoringCycle();
   }
 });
 
@@ -402,11 +419,13 @@ function checkPermissionsOnLoad() {
   const permGranted = localStorage.getItem(STORAGE_KEY_PERMISSIONS);
   updatePermissionBadges();
 
-  // If notification permission is default or not yet granted, prompt user nicely
-  if (!permGranted || (('Notification' in window) && Notification.permission === 'default')) {
+  const notifNotGranted = ('Notification' in window) && Notification.permission !== 'granted';
+
+  // Automatically open on first entry or if notification permission is not yet allowed
+  if (!permGranted || notifNotGranted) {
     setTimeout(() => {
       openPermissionModal();
-    }, 600);
+    }, 400);
   }
 }
 
@@ -465,6 +484,11 @@ async function grantAllPermissions() {
   closePermissionModal();
 
   showToast('✓ সব পারমিশন সফলভাবে চালু হয়েছে!', 'success');
+
+  // If accounts are loaded, start monitoring right away
+  if (accounts.length > 0 && !settings.isMonitoring) {
+    startMonitoring();
+  }
 }
 
 function openPermissionModal() {
@@ -635,38 +659,145 @@ async function handleNewOtp(account, otpCode, iconClass, messages) {
 }
 
 // ============================================================================
-// BULLETPROOF OTP EXTRACTOR
-// (Handles code, otp, data.code, and regex in content/messages)
+// BULLETPROOF OTP EXTRACTOR & DECODERS (COMPATIBLE WITH code.yamin.bd)
 // ============================================================================
-function extractOtpCode(result) {
-  if (!result) return null;
+function decodeBase64Utf8(b64) {
+  if (!b64) return '';
+  try {
+    const binary = atob(b64);
+    const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch (_) {
+    return '';
+  }
+}
 
-  // 1. Direct properties
-  if (result.code) return String(result.code).trim();
-  if (result.otp) return String(result.otp).trim();
-  if (result.verification_code) return String(result.verification_code).trim();
-  if (result.data && (result.data.code || result.data.otp)) {
-    return String(result.data.code || result.data.otp).trim();
+function extractTextSnippet(html) {
+  if (!html) return '';
+  return String(html)
+    .replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, '')
+    .replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findCodeInText(subject, body) {
+  const subj = subject || '';
+  // Check for spaced code in subject e.g. "123 456 is your Instagram code" or "123-456"
+  const subjSpaced = subj.match(/\b(\d{3})[\s-](\d{3})\b/);
+  if (subjSpaced) return subjSpaced[1] + subjSpaced[2];
+
+  const subjMatch = subj.match(/\b(\d{4,8})\b/);
+  if (subjMatch && !subjMatch[1].match(/^(19|20)\d{2}$/)) {
+    return subjMatch[1];
   }
 
-  // 2. Regex scan inside content, message or messages array
-  const textToScan = [
-    result.content,
-    result.message,
-    ...(Array.isArray(result.messages) ? result.messages : [])
-  ].filter(Boolean).join(' ');
+  let text = (body || '')
+    .replace(/\b\d{4}[-\/]\d{2}[-\/]\d{2}\b/g, '')
+    .replace(/\b(19|20)\d{2}\b/g, '')
+    .replace(/\b94025\b/g, '')
+    .replace(/\b\d{10,}\b/g, '');
 
-  if (textToScan) {
-    // Look for OTP patterns like "code is 123456", "code: 123456", or 4-8 digit numbers
-    const otpMatch = textToScan.match(/(?:code|otp|verification|pin|password)[\s:=#is]+([0-9]{4,8})/i)
-      || textToScan.match(/\b([0-9]{6})\b/)
-      || textToScan.match(/\b([0-9]{4,8})\b/);
-    if (otpMatch) {
-      return otpMatch[1].trim();
+  const spacedMatch = text.match(/(?:code|otp|pin|password|verification)[^\d]{0,25}(\d{3})[\s-](\d{3})\b/i);
+  if (spacedMatch) return spacedMatch[1] + spacedMatch[2];
+
+  const contextMatch = text.match(/(?:code|otp|pin|password|verification|confirm)[^\d]{0,25}(\d{4,8})/i);
+  if (contextMatch && !contextMatch[1].match(/^(19|20)\d{2}$/)) {
+    return contextMatch[1];
+  }
+
+  const match58 = text.match(/(?:^|\s|>|:|-)(\d{5,8})(?:$|\s|<|\.|,|-)/) || text.match(/\b(\d{5,8})\b/);
+  if (match58) return match58[1];
+
+  const match4 = text.match(/\b(?!(?:19|20)\d{2}\b)(\d{4})\b/);
+  return match4 ? match4[1] : null;
+}
+
+function detectServiceIcon(text, defaultIcon) {
+  const str = String(text || '').toLowerCase();
+  if (str.includes('instagram')) return 'fa-brands fa-instagram';
+  if (str.includes('facebook') || str.includes('meta')) return 'fa-brands fa-facebook';
+  if (str.includes('google')) return 'fa-brands fa-google';
+  if (str.includes('whatsapp')) return 'fa-brands fa-whatsapp';
+  if (str.includes('microsoft')) return 'fa-brands fa-microsoft';
+  if (str.includes('telegram')) return 'fa-brands fa-telegram';
+  if (str.includes('twitter') || str.includes(' x ')) return 'fa-brands fa-x-twitter';
+  if (str.includes('apple')) return 'fa-brands fa-apple';
+  return defaultIcon || 'fa-solid fa-key';
+}
+
+function extractOtpAndDetails(result) {
+  if (!result) return { code: null, icon: 'fa-solid fa-key', messages: [] };
+
+  let detectedIcon = result.icon || 'fa-solid fa-key';
+  let messageList = [];
+
+  // 1. Direct top-level code if valid
+  if (result.code && String(result.code).trim() !== '------') {
+    const c = String(result.code).trim();
+    return { code: c, icon: detectServiceIcon(result.service || result.content, detectedIcon), messages: [] };
+  }
+  if (result.otp && String(result.otp).trim() !== '------') {
+    const c = String(result.otp).trim();
+    return { code: c, icon: detectServiceIcon(result.service || result.content, detectedIcon), messages: [] };
+  }
+  if (result.verification_code) {
+    const c = String(result.verification_code).trim();
+    return { code: c, icon: detectServiceIcon(result.service || result.content, detectedIcon), messages: [] };
+  }
+  if (result.data && (result.data.code || result.data.otp)) {
+    const c = String(result.data.code || result.data.otp).trim();
+    if (c && c !== '------') {
+      return { code: c, icon: detectServiceIcon(result.data.service, detectedIcon), messages: [] };
     }
   }
 
-  return null;
+  // 2. Scan messages array (Crucial for Instagram and code.yamin.bd)
+  if (Array.isArray(result.messages) && result.messages.length > 0) {
+    messageList = result.messages;
+    for (const msg of result.messages) {
+      if (!msg) continue;
+      const subject = msg.subject || '';
+      const sender = msg.senderName || msg.from || '';
+      detectedIcon = msg.icon || detectServiceIcon(subject + ' ' + sender, detectedIcon);
+
+      // Check if message object already has extracted code
+      if (msg.code && String(msg.code).trim() !== '------') {
+        const c = String(msg.code).trim();
+        if (/^\d{4,8}$/.test(c) && !/^(19|20)\d{2}$/.test(c)) {
+          return { code: c, icon: detectedIcon, messages: messageList };
+        }
+      }
+
+      // Check subject and body
+      let body = msg.message || '';
+      if (!body && msg.message_b64) {
+        body = decodeBase64Utf8(msg.message_b64);
+      }
+      const snippet = extractTextSnippet(body);
+      const extracted = findCodeInText(subject, snippet || body);
+      if (extracted) {
+        return { code: extracted, icon: detectedIcon, messages: messageList };
+      }
+    }
+  }
+
+  // 3. Fallback to scanning content/message text
+  const textToScan = [
+    typeof result.content === 'string' ? result.content : '',
+    typeof result.message === 'string' ? result.message : ''
+  ].filter(Boolean).join(' ');
+
+  if (textToScan) {
+    const extracted = findCodeInText('', textToScan);
+    if (extracted) {
+      return { code: extracted, icon: detectServiceIcon(textToScan, detectedIcon), messages: messageList };
+    }
+  }
+
+  return { code: null, icon: detectedIcon, messages: messageList };
 }
 
 // ============================================================================
@@ -689,7 +820,7 @@ async function fetchAccountOtp(account) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(18000)
+      signal: AbortSignal.timeout(10000)
     });
     if (proxyRes.ok) {
       return await proxyRes.json();
@@ -704,7 +835,7 @@ async function fetchAccountOtp(account) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(18000)
+      signal: AbortSignal.timeout(10000)
     });
     return await res.json();
   } catch (directErr) {
@@ -783,8 +914,8 @@ async function runMonitoringCycle() {
   isCurrentlyFetching = true;
   document.getElementById('metricActive').textContent = accounts.length;
 
-  // Check 2 accounts concurrently
-  const batchSize = Math.min(2, accounts.length);
+  // Check up to 5 accounts concurrently for blazing-fast 1-2 second cycles
+  const batchSize = Math.min(5, accounts.length);
   
   for (let b = 0; b < accounts.length; b += batchSize) {
     if (!settings.isMonitoring) break;
@@ -802,12 +933,9 @@ async function runMonitoringCycle() {
           const result = await fetchAccountOtp(account);
           account.lastCheckedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           
-          const code = extractOtpCode(result);
+          const { code, icon, messages } = extractOtpAndDetails(result);
 
           if (code) {
-            const icon = (result && result.icon) || 'fa-solid fa-envelope-open-text';
-            const messages = (result && (result.messages || [result.content])) || [];
-
             if (account.lastSeenCode !== code) {
               account.lastSeenCode = code;
               await handleNewOtp(account, code, icon, messages);
@@ -856,14 +984,13 @@ async function checkSingleAccount(accountId) {
   try {
     const result = await fetchAccountOtp(account);
     account.lastCheckedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const code = extractOtpCode(result);
+    const { code, icon, messages } = extractOtpAndDetails(result);
 
     if (code) {
-      const icon = (result && result.icon) || 'fa-solid fa-key';
       account.lastSeenCode = code;
-      await handleNewOtp(account, code, icon, result.messages || [result.content]);
+      await handleNewOtp(account, code, icon, messages);
     } else {
-      showToast(result.error || 'No active OTP in mailbox yet', 'info');
+      showToast(result && result.error ? result.error : 'No active OTP in mailbox yet', 'info');
       account.lastStatus = account.lastOtp ? 'success' : 'idle';
       if (result && result.error_code === 'token_error') {
         account.lastStatus = 'error';
@@ -1008,17 +1135,7 @@ function parseAccountsInput(rawText) {
 }
 
 function addSampleAccounts() {
-  const sampleText = [
-    'john.worker01@hotmail.com|Pass1234!|0.AX4Aw5...sample_token_1|1fec8e78-bce4-4aaf-ab1b-5451cc387264',
-    'sarah.leads99@outlook.com|Secret9988!|0.AX4Aw5...sample_token_2|1fec8e78-bce4-4aaf-ab1b-5451cc387264|rec_sarah@gmail.com',
-    'david.task2026@hotmail.com|MyPass77#|0.AX4Aw5...sample_token_3',
-    'alexa.verify@live.com|0.AX4Aw5...sample_token_4',
-    'mark.hotmail.ops@hotmail.com|P@ssw0rd2026|0.AX4Aw5...sample_token_5'
-  ].join('\n');
-
-  const textarea = document.getElementById('bulkAccountsInput');
-  textarea.value = sampleText;
-  updateDetectedCount();
+  // Demo accounts removed for clean production experience
 }
 
 function updateDetectedCount() {
@@ -1054,7 +1171,10 @@ function saveBulkAccounts() {
   updateMetrics();
   closeAddModal();
 
-  showToast(`Successfully added ${addedCount} accounts!`, 'success');
+  showToast(`Added ${addedCount} accounts! Starting Live Monitor...`, 'success');
+
+  // Immediately start live monitoring so incoming OTPs are never missed
+  startMonitoring();
 }
 
 function deleteAccount(accountId) {
@@ -1479,7 +1599,8 @@ function initDomEvents() {
 
   // Bulk Input Live Counter
   document.getElementById('bulkAccountsInput').addEventListener('input', updateDetectedCount);
-  document.getElementById('loadSampleAccountsBtn').addEventListener('click', addSampleAccounts);
+  const sampleBtn = document.getElementById('loadSampleAccountsBtn');
+  if (sampleBtn) sampleBtn.addEventListener('click', addSampleAccounts);
   document.getElementById('saveAccountsBtn').addEventListener('click', saveBulkAccounts);
 
   // Clear buttons
