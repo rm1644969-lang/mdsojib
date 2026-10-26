@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#080c14">
+  <meta name="description" content="Real-time Hotmail/Outlook OTP monitoring with instant notification banner and auto-copy using code.yamin.bd API">
+  
+  <!-- iOS and Android Web App Meta -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MailCode OTP">
+  
+  <title>MailCode OTP Grabber & Auto-Copy</title>
+  
+  <!-- Manifest for PWA -->
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/svg+xml" href="/icons/icon-192.svg">
+  <link rel="apple-touch-icon" href="/icons/icon-192.svg">
+
+  <!-- Google Fonts & FontAwesome -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700;800&family=Outfit:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+  <!-- ========================================================================
+       TOP HEADS-UP SMS NOTIFICATION BANNER (POPS UP ON PHONE TOP SCREEN)
+       ======================================================================== -->
+  <div class="heads-up-container" id="headsUpContainer">
+    <div class="heads-up-banner" id="headsUpBanner" role="alert">
+      <div class="banner-top-row">
+        <div class="banner-app-info">
+          <i class="fa-solid fa-bolt"></i>
+          <span>New OTP Received</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="banner-timestamp" id="bannerTime">Just now</span>
+          <button class="banner-close-btn" id="bannerCloseBtn" title="Dismiss" aria-label="Dismiss notification">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+      
+      <div class="banner-content" id="bannerContent">
+        <div class="banner-service-icon" id="bannerServiceIcon">
+          <i class="fa-brands fa-google"></i>
+        </div>
+        <div class="banner-details">
+          <div class="banner-email" id="bannerEmail">user@hotmail.com</div>
+          <div class="banner-otp-row">
+            <span class="banner-otp-code" id="bannerOtpCode">847291</span>
+            <span class="banner-copied-badge" id="bannerCopiedBadge">
+              <i class="fa-solid fa-check"></i> Copied!
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="banner-progress-bar" id="bannerProgress"></div>
+    </div>
+  </div>
+
+  <!-- Main Viewport -->
+  <div class="app-viewport">
+    
+    <!-- Top Sticky Header -->
+    <header class="app-header">
+      <div class="brand-section">
+        <div class="brand-icon">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <div class="brand-title-wrap">
+          <h1>MailCode Live OTP</h1>
+          <div class="brand-subtitle" id="connectionStatus">
+            <i class="fa-solid fa-circle" style="font-size: 0.5rem; color: #10b981;"></i> code.yamin.bd API
+          </div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Phone QR Connect Button -->
+        <button class="icon-button" id="phoneConnectBtn" title="Open on Phone" aria-label="Open on Phone">
+          <i class="fa-solid fa-mobile-screen"></i>
+          <span class="badge-dot"></span>
+        </button>
+        <!-- Sound Toggle -->
+        <button class="icon-button active" id="soundHeaderBtn" title="Toggle Sound" aria-label="Toggle Sound">
+          <i class="fa-solid fa-volume-high" id="soundHeaderIcon"></i>
+        </button>
+        <!-- Wake Lock Indicator -->
+        <button class="icon-button" id="wakeLockBtn" title="Screen Wake Lock" aria-label="Keep screen awake">
+          <i class="fa-solid fa-sun" id="wakeLockIcon"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="app-content">
+
+      <!-- MASTER CONTROL CARD -->
+      <section class="master-control-card">
+        <div class="monitor-status-header">
+          <div class="status-indicator">
+            <span class="pulse-dot" id="pulseDot"></span>
+            <span id="monitorStatusText">Ready to Monitor</span>
+          </div>
+          <div class="api-badge online" id="apiBadge">
+            <i class="fa-solid fa-signal"></i>
+            <span>API Online</span>
+          </div>
+        </div>
+
+        <!-- Big Start / Stop Button -->
+        <button class="main-start-btn" id="startMonitorBtn">
+          <i class="fa-solid fa-play" id="startBtnIcon"></i>
+          <span id="startBtnText">START LIVE MONITORING</span>
+        </button>
+
+        <!-- Quick Toggles -->
+        <div class="quick-toggles-grid">
+          <!-- Auto Copy Toggle -->
+          <div class="toggle-chip active" id="toggleAutoCopy">
+            <div class="toggle-chip-label">
+              <i class="fa-solid fa-copy"></i>
+              <span>Auto-Copy Code</span>
+            </div>
+            <div class="toggle-switch-ui"></div>
+          </div>
+
+          <!-- Sound Alert Toggle -->
+          <div class="toggle-chip active" id="toggleSound">
+            <div class="toggle-chip-label">
+              <i class="fa-solid fa-bell"></i>
+              <span>SMS Sound</span>
+            </div>
+            <div class="toggle-switch-ui"></div>
+          </div>
+
+          <!-- Vibration Toggle -->
+          <div class="toggle-chip active" id="toggleVibrate">
+            <div class="toggle-chip-label">
+              <i class="fa-solid fa-mobile"></i>
+              <span>Phone Vibrate</span>
+            </div>
+            <div class="toggle-switch-ui"></div>
+          </div>
+
+          <!-- System Push Notification -->
+          <div class="toggle-chip active" id="toggleSystemNotif">
+            <div class="toggle-chip-label">
+              <i class="fa-solid fa-comment-sms"></i>
+              <span>Push Notice</span>
+            </div>
+            <div class="toggle-switch-ui"></div>
+          </div>
+        </div>
+
+        <!-- Sub Controls (Interval & Test Simulator) -->
+        <div class="sub-controls-row">
+          <div class="interval-selector">
+            <i class="fa-regular fa-clock"></i>
+            <span>Poll:</span>
+            <select class="interval-select" id="intervalSelect" aria-label="Poll Interval">
+              <option value="3000">Fast (3s)</option>
+              <option value="5000" selected>Normal (5s)</option>
+              <option value="10000">Relaxed (10s)</option>
+              <option value="15000">Slow (15s)</option>
+            </select>
+          </div>
+
+          <button class="test-btn" id="simulateOtpBtn" title="Test sound, vibration, popup and auto-copy">
+            <i class="fa-solid fa-vial"></i>
+            <span>Test Simulation</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- METRICS OVERVIEW -->
+      <section class="metrics-row">
+        <div class="metric-card">
+          <span class="metric-label">Accounts</span>
+          <span class="metric-value cyan" id="metricAccounts">0</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Checking</span>
+          <span class="metric-value indigo" id="metricActive">0</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">OTPs Captured</span>
+          <span class="metric-value green" id="metricOtps">0</span>
+        </div>
+      </section>
+
+      <!-- ACCOUNTS SECTION (TAB 1) -->
+      <section id="accountsSection">
+        <div class="section-header">
+          <div class="section-title">
+            <span>Loaded Mail Accounts</span>
+            <span class="count-badge" id="accountCountBadge">0</span>
+          </div>
+          <div class="section-actions">
+            <button class="btn-secondary" id="clearAllBtn" title="Clear All Accounts">
+              <i class="fa-regular fa-trash-can"></i> Clear
+            </button>
+            <button class="btn-primary" id="openAddModalBtn">
+              <i class="fa-solid fa-plus"></i> Load Accounts
+            </button>
+          </div>
+        </div>
+
+        <!-- Accounts Container -->
+        <div class="accounts-container" id="accountsList" style="margin-top: 12px;">
+          <!-- Dynamically populated or empty state -->
+          <div class="empty-state" id="emptyState">
+            <div class="empty-icon">
+              <i class="fa-solid fa-inbox"></i>
+            </div>
+            <div class="empty-title">No Accounts Loaded</div>
+            <div class="empty-desc">
+              Paste your Hotmail / Outlook access tokens or credentials (10 or more) to start capturing OTP codes.
+            </div>
+            <button class="btn-primary" id="emptyLoadBtn" style="margin-top: 6px;">
+              <i class="fa-solid fa-file-import"></i> Paste Hotmail Credentials
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- OTP HISTORY SECTION (TAB 2) -->
+      <section id="historySection" style="display: none;">
+        <div class="section-header">
+          <div class="section-title">
+            <span>Captured OTP History</span>
+            <span class="count-badge" id="historyCountBadge">0</span>
+          </div>
+          <div class="section-actions">
+            <button class="btn-secondary" id="clearHistoryBtn">
+              <i class="fa-regular fa-trash-can"></i> Clear
+            </button>
+          </div>
+        </div>
+
+        <div class="accounts-container history-section" id="historyList" style="margin-top: 12px;">
+          <!-- History items here -->
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Bottom Navigation Bar for Mobile -->
+    <nav class="bottom-nav">
+      <button class="nav-item active" id="navAccounts">
+        <i class="fa-solid fa-envelope"></i>
+        <span>Accounts</span>
+      </button>
+      <button class="nav-item" id="navHistory">
+        <i class="fa-solid fa-clock-rotate-left"></i>
+        <span>OTP Log</span>
+      </button>
+      <button class="nav-item" id="navPhone">
+        <i class="fa-solid fa-qrcode"></i>
+        <span>Phone Connect</span>
+      </button>
+    </nav>
+
+  </div>
+
+  <!-- ========================================================================
+       MODAL: LOAD / PASTE ACCOUNTS
+       ======================================================================== -->
+  <div class="modal-overlay" id="addAccountsModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-file-arrow-up" style="color: var(--primary);"></i>
+          <span>Load Mail Accounts</span>
+        </div>
+        <button class="modal-close-btn" id="closeAddModalBtn" aria-label="Close modal">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="format-hint">
+        <strong>Supported Format (1 line per account):</strong><br>
+        <span class="format-code">email|password|refresh_token|client_id|recovery_email</span>
+      </div>
+
+      <textarea 
+        class="textarea-field" 
+        id="bulkAccountsInput" 
+        placeholder="Paste your 10 or more accounts here, e.g:
+user1@hotmail.com|pass1|token1|client_id_uuid|rec1@gmail.com
+user2@outlook.com|pass2|token2|client_id_uuid
+user3@live.com|pass3|token3|client_id_uuid"></textarea>
+
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <button class="btn-secondary" id="loadSampleAccountsBtn">
+          <i class="fa-solid fa-wand-magic-sparkles"></i> Load 5 Demo Accounts
+        </button>
+        <span id="detectedCountText" style="font-size: 0.76rem; color: var(--text-dim);">0 accounts detected</span>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn-secondary" id="cancelAddBtn">Cancel</button>
+        <button class="btn-primary" id="saveAccountsBtn">
+          <i class="fa-solid fa-check"></i> Add to Monitor
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================
+       MODAL: CONNECT PHONE VIA QR CODE
+       ======================================================================== -->
+  <div class="modal-overlay" id="qrModal">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-mobile-screen-button" style="color: var(--accent-cyan);"></i>
+          <span>Connect Your Phone</span>
+        </div>
+        <button class="modal-close-btn" id="closeQrModalBtn" aria-label="Close modal">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="qr-container">
+        <p style="font-size: 0.82rem; color: var(--text-muted);">
+          আপনার মোবাইল ফোনের ক্যামেরা বা কিউআর কোড স্ক্যানার দিয়ে স্ক্যান করুন (একই Wi-Fi তে কানেক্ট থাকতে হবে):
+        </p>
+
+        <div class="qr-image-wrap">
+          <img id="qrImage" src="" alt="Scan QR Code to open on mobile">
+        </div>
+
+        <div class="phone-url-chip" id="phoneUrlChip">
+          <span id="phoneUrlText">http://192.168.0.101:3000</span>
+          <i class="fa-regular fa-copy" id="copyUrlBtn" style="cursor: pointer;" title="Copy Link"></i>
+        </div>
+
+        <div style="font-size: 0.74rem; color: var(--text-dim); text-align: left; line-height: 1.6; background: rgba(255,255,255,0.03); padding: 10px 14px; border-radius: 8px;">
+          <strong>💡 টিপস (মোবাইলে ফুল অ্যাপ বানাতে):</strong><br>
+          ১. লিংকে ঢুকলে Chrome এর উপরে <strong>"Install App"</strong> অথবা <strong>"Add to Home Screen"</strong> চাপুন।<br>
+          ২. অ্যাপটির নোটিফিকেশন পারমিশন Allow করে দিন।<br>
+          ৩. ব্যস! এরপর ওটিপি আসলে সরাসরি ফোনে এসএমএসের মতো ভেসে উঠবে এবং অটো কপি হয়ে যাবে!
+        </div>
+      </div>
+
+      <div class="modal-footer" style="justify-content: flex-end;">
+        <button class="btn-secondary" id="closeQrFooterBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Main JavaScript Logic -->
+  <script src="/app.js"></script>
+</body>
+</html>
