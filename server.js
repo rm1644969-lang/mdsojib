@@ -106,6 +106,11 @@ function detectServiceIcon(text, defaultIcon) {
 function extractOtpAndDetails(data) {
   if (!data) return { code: null, icon: 'fa-solid fa-key', messages: [] };
 
+  // If API returned an error, do NOT extract false codes from error strings
+  if (data.status === false || data.error_code === 'token_error') {
+    return { code: null, icon: 'fa-solid fa-key', messages: [], error: data.error };
+  }
+
   let detectedIcon = data.icon || 'fa-solid fa-key';
   let messageList = [];
 
@@ -134,20 +139,22 @@ function extractOtpAndDetails(data) {
     messageList = data.messages;
     for (const msg of data.messages) {
       if (!msg) continue;
-      const subject = msg.subject || '';
-      const sender = msg.senderName || msg.from || '';
+      const subject = msg.subject || msg.title || '';
+      const sender = msg.senderName || msg.from || msg.sender || '';
       detectedIcon = msg.icon || detectServiceIcon(subject + ' ' + sender, detectedIcon);
 
       // Check if message object already has extracted code
-      if (msg.code && String(msg.code).trim() !== '------') {
-        const c = String(msg.code).trim();
-        if (/^\d{4,8}$/.test(c) && !/^(19|20)\d{2}$/.test(c)) {
-          return { code: c, icon: detectedIcon, messages: messageList };
+      for (const field of [msg.code, msg.otp, msg.verification_code]) {
+        if (field && String(field).trim() !== '------') {
+          const c = String(field).trim();
+          if (/^\d{4,8}$/.test(c) && !/^(19|20)\d{2}$/.test(c)) {
+            return { code: c, icon: detectedIcon, messages: messageList };
+          }
         }
       }
 
       // Check subject and body
-      let body = msg.message || '';
+      let body = msg.message || msg.body || msg.content || msg.snippet || msg.text || '';
       if (!body && msg.message_b64) {
         body = decodeBase64Utf8(msg.message_b64);
       }
@@ -159,16 +166,20 @@ function extractOtpAndDetails(data) {
     }
   }
 
-  // 3. Fallback to scanning content/message text
-  const textToScan = [
-    typeof data.content === 'string' ? data.content : '',
-    typeof data.message === 'string' ? data.message : ''
-  ].filter(Boolean).join(' ');
+  // 3. Fallback to scanning content/message text only if not an error message
+  if (data.status === true) {
+    const textToScan = [
+      typeof data.content === 'string' ? data.content : '',
+      typeof data.message === 'string' ? data.message : '',
+      typeof data.snippet === 'string' ? data.snippet : '',
+      typeof data.body === 'string' ? data.body : ''
+    ].filter(Boolean).join(' ');
 
-  if (textToScan) {
-    const extracted = findCodeInText('', textToScan);
-    if (extracted) {
-      return { code: extracted, icon: detectServiceIcon(textToScan, detectedIcon), messages: messageList };
+    if (textToScan && !textToScan.toLowerCase().includes('token error') && !textToScan.toLowerCase().includes('aadsts')) {
+      const extracted = findCodeInText('', textToScan);
+      if (extracted) {
+        return { code: extracted, icon: detectServiceIcon(textToScan, detectedIcon), messages: messageList };
+      }
     }
   }
 
@@ -179,7 +190,7 @@ function extractOtpAndDetails(data) {
 async function runServerMonitorCycle() {
   if (!isServerMonitoring || serverAccounts.length === 0) return;
 
-  // Poll all accounts in parallel for instant 300ms cycle
+  // Poll accounts in parallel
   await Promise.all(
     serverAccounts.map(async (account) => {
       const payload = {
@@ -197,19 +208,14 @@ async function runServerMonitorCycle() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(6000)
+          signal: AbortSignal.timeout(8000)
         });
-        const result = await res.json();
+        const result = await res.json().catch(() => null);
+        if (!result) return;
         const { code, icon, messages } = extractOtpAndDetails(result);
 
         if (code) {
-          if (!account.isBaselineDone) {
-            // First time checking account on server: record existing code as baseline, NEVER broadcast old code
-            account.isBaselineDone = true;
-            account.lastSeenCode = code;
-            console.log(`[SERVER BASELINE] ${account.email} existing code ${code} recorded (ignored as old OTP)`);
-          } else if (account.lastSeenCode !== code) {
-            // A genuine NEW OTP arrived!
+          if (account.lastSeenCode !== code) {
             account.lastSeenCode = code;
             console.log(`⚡ [SERVER NEW OTP CAPTURED] ${account.email} => ${code}`);
 
@@ -228,14 +234,12 @@ async function runServerMonitorCycle() {
 
             broadcastSse('NEW_OTP', otpEvent);
           }
-        } else {
-          account.isBaselineDone = true;
         }
-        } catch (err) {
-          // Silent catch to keep loop running
-        }
-      })
-    );
+      } catch (err) {
+        // Silent catch to keep loop running
+      }
+    })
+  );
 }
 
 function startServerMonitoring() {
@@ -300,8 +304,7 @@ app.post('/api/monitor/sync', (req, res) => {
       const existing = serverAccounts.find((s) => s.email.toLowerCase() === incomingAcc.email.toLowerCase());
       return {
         ...incomingAcc,
-        isBaselineDone: existing ? existing.isBaselineDone : (incomingAcc.isBaselineDone || false),
-        lastSeenCode: existing ? existing.lastSeenCode : (incomingAcc.lastSeenCode || null)
+        lastSeenCode: existing ? existing.lastSeenCode : (incomingAcc.lastSeenCode || incomingAcc.lastOtp || null)
       };
     });
   }

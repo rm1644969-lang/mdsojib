@@ -57,11 +57,8 @@ function loadFromStorage() {
     const savedAccounts = localStorage.getItem(STORAGE_KEY_ACCOUNTS);
     if (savedAccounts) {
       accounts = JSON.parse(savedAccounts);
-      // Clean loaded accounts: do NOT show stale OTP boxes on reload/startup
       accounts.forEach((acc) => {
-        acc.isBaselineDone = false;
-        acc.lastStatus = 'idle';
-        acc.lastOtp = null; // Do NOT show old OTP
+        acc.lastStatus = acc.lastOtp ? 'success' : 'idle';
       });
     }
     
@@ -139,7 +136,6 @@ function initServerSse() {
 
         if (account.lastSeenCode !== otpData.code) {
           account.lastSeenCode = otpData.code;
-          account.isBaselineDone = true;
           await handleNewOtp(account, otpData.code, otpData.icon, otpData.messages);
         }
       } catch (err) {
@@ -185,7 +181,6 @@ async function fetchLatestServerOtps() {
         const acc = accounts.find((a) => a.email.toLowerCase() === item.email.toLowerCase());
         if (acc && acc.lastSeenCode !== item.code) {
           acc.lastSeenCode = item.code;
-          acc.isBaselineDone = true;
           await handleNewOtp(acc, item.code, item.icon, item.messages);
         }
       }
@@ -811,6 +806,11 @@ function detectServiceIcon(text, defaultIcon) {
 function extractOtpAndDetails(result) {
   if (!result) return { code: null, icon: 'fa-solid fa-key', messages: [] };
 
+  // If API returned an error, do NOT extract false codes from error strings
+  if (result.status === false || result.error_code === 'token_error') {
+    return { code: null, icon: 'fa-solid fa-key', messages: [], error: result.error };
+  }
+
   let detectedIcon = result.icon || 'fa-solid fa-key';
   let messageList = [];
 
@@ -839,20 +839,22 @@ function extractOtpAndDetails(result) {
     messageList = result.messages;
     for (const msg of result.messages) {
       if (!msg) continue;
-      const subject = msg.subject || '';
-      const sender = msg.senderName || msg.from || '';
+      const subject = msg.subject || msg.title || '';
+      const sender = msg.senderName || msg.from || msg.sender || '';
       detectedIcon = msg.icon || detectServiceIcon(subject + ' ' + sender, detectedIcon);
 
       // Check if message object already has extracted code
-      if (msg.code && String(msg.code).trim() !== '------') {
-        const c = String(msg.code).trim();
-        if (/^\d{4,8}$/.test(c) && !/^(19|20)\d{2}$/.test(c)) {
-          return { code: c, icon: detectedIcon, messages: messageList };
+      for (const field of [msg.code, msg.otp, msg.verification_code]) {
+        if (field && String(field).trim() !== '------') {
+          const c = String(field).trim();
+          if (/^\d{4,8}$/.test(c) && !/^(19|20)\d{2}$/.test(c)) {
+            return { code: c, icon: detectedIcon, messages: messageList };
+          }
         }
       }
 
       // Check subject and body
-      let body = msg.message || '';
+      let body = msg.message || msg.body || msg.content || msg.snippet || msg.text || '';
       if (!body && msg.message_b64) {
         body = decodeBase64Utf8(msg.message_b64);
       }
@@ -864,16 +866,20 @@ function extractOtpAndDetails(result) {
     }
   }
 
-  // 3. Fallback to scanning content/message text
-  const textToScan = [
-    typeof result.content === 'string' ? result.content : '',
-    typeof result.message === 'string' ? result.message : ''
-  ].filter(Boolean).join(' ');
+  // 3. Fallback to scanning content/message text only if status is true
+  if (result.status === true) {
+    const textToScan = [
+      typeof result.content === 'string' ? result.content : '',
+      typeof result.message === 'string' ? result.message : '',
+      typeof result.snippet === 'string' ? result.snippet : '',
+      typeof result.body === 'string' ? result.body : ''
+    ].filter(Boolean).join(' ');
 
-  if (textToScan) {
-    const extracted = findCodeInText('', textToScan);
-    if (extracted) {
-      return { code: extracted, icon: detectServiceIcon(textToScan, detectedIcon), messages: messageList };
+    if (textToScan && !textToScan.toLowerCase().includes('token error') && !textToScan.toLowerCase().includes('aadsts')) {
+      const extracted = findCodeInText('', textToScan);
+      if (extracted) {
+        return { code: extracted, icon: detectServiceIcon(textToScan, detectedIcon), messages: messageList };
+      }
     }
   }
 
@@ -897,32 +903,35 @@ async function fetchAccountOtp(account) {
     payload.recovery_email = account.recoveryEmail;
   }
 
-  // 1. Direct fetch to code.yamin.bd (FASTEST: 200-400ms, no proxy lag)
+  // 1. Direct fetch to code.yamin.bd
   try {
     const res = await fetch('https://code.yamin.bd/api.php?action=fetch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(6000)
+      signal: AbortSignal.timeout(8000)
     });
-    if (res.ok) {
-      return await res.json();
-    }
+    const data = await res.json().catch(() => null);
+    if (data) return data;
   } catch (directErr) {
-    // 2. Fallback to local server proxy only if direct network glitch
-    try {
-      const proxyRes = await fetch('/api/proxy-fetch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(5000)
-      });
-      if (proxyRes.ok) {
-        return await proxyRes.json();
-      }
-    } catch (_) {}
-    throw new Error('Connection failed: ' + directErr.message);
+    console.warn('Direct fetch error, falling back to local proxy:', directErr.message);
   }
+
+  // 2. Fallback to local server proxy
+  try {
+    const proxyRes = await fetch('/api/proxy-fetch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000)
+    });
+    const proxyData = await proxyRes.json().catch(() => null);
+    if (proxyData) return proxyData;
+  } catch (proxyErr) {
+    console.warn('Proxy fetch error:', proxyErr.message);
+  }
+
+  throw new Error('Connection failed: API unreachable');
 }
 
 // ============================================================================
@@ -1011,27 +1020,19 @@ async function runMonitoringCycle() {
         const { code, icon, messages } = extractOtpAndDetails(result);
 
         if (code) {
-          if (!account.isBaselineDone) {
-            // First time checking account: record existing inbox code as baseline snapshot, NEVER alert or show old code
-            account.isBaselineDone = true;
-            account.lastSeenCode = code;
-            account.lastStatus = 'idle';
-            account.lastOtp = null;
-          } else if (account.lastSeenCode !== code) {
-            // A genuine NEW OTP arrived!
+          if (account.lastOtp !== code) {
             account.lastSeenCode = code;
             await handleNewOtp(account, code, icon, messages);
           } else {
-            account.lastStatus = account.lastOtp ? 'success' : 'idle';
+            account.lastStatus = 'success';
           }
         } else {
-          account.isBaselineDone = true;
           if (result && result.error) {
+            account.lastStatus = 'error';
             if (result.error_code === 'token_error') {
-              account.lastStatus = 'error';
               account.lastError = 'Token Error';
             } else {
-              account.lastStatus = account.lastOtp ? 'success' : 'idle';
+              account.lastError = result.error;
             }
           } else {
             account.lastStatus = account.lastOtp ? 'success' : 'idle';
@@ -1065,35 +1066,26 @@ async function checkSingleAccount(accountId) {
     const { code, icon, messages } = extractOtpAndDetails(result);
 
     if (code) {
-      if (!account.isBaselineDone) {
-        account.isBaselineDone = true;
-        if (account.lastSeenCode && account.lastSeenCode !== code) {
-          account.lastSeenCode = code;
-          await handleNewOtp(account, code, icon, messages);
-        } else {
-          account.lastSeenCode = code;
-          showToast(`Account calibrated. Inbox has code ${code}. Ready for NEW OTP!`, 'info');
-          account.lastStatus = 'idle';
-        }
-      } else if (account.lastSeenCode !== code) {
-        account.lastSeenCode = code;
-        await handleNewOtp(account, code, icon, messages);
-      } else {
-        showToast(`No new OTP (Inbox code ${code} is already checked)`, 'info');
-        account.lastStatus = account.lastOtp ? 'success' : 'idle';
-      }
+      account.lastSeenCode = code;
+      await handleNewOtp(account, code, icon, messages);
+      showToast(`⚡ OTP Code: ${code} (Copied!)`, 'success');
     } else {
-      account.isBaselineDone = true;
-      showToast(result && result.error ? result.error : 'No active OTP in mailbox yet', 'info');
-      account.lastStatus = account.lastOtp ? 'success' : 'idle';
-      if (result && result.error_code === 'token_error') {
+      if (result && result.error) {
+        showToast(result.error, 'error');
         account.lastStatus = 'error';
-        account.lastError = 'Token Error';
+        if (result.error_code === 'token_error') {
+          account.lastError = 'Token Error (টোকেন মেয়াদোত্তীর্ণ)';
+        } else {
+          account.lastError = result.error;
+        }
+      } else {
+        showToast('No active OTP in mailbox yet. Send code from Instagram now.', 'info');
+        account.lastStatus = account.lastOtp ? 'success' : 'idle';
       }
     }
   } catch (err) {
     showToast('Failed to check account: ' + err.message, 'error');
-    account.lastStatus = 'error';
+    account.lastStatus = account.lastOtp ? 'success' : 'error';
     account.lastError = 'Network error';
   }
 
